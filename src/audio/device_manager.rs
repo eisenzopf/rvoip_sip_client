@@ -163,7 +163,8 @@ impl AudioManager {
         // Start playback (for receiving audio from remote party)
         match self.device_manager.start_playback(&call_uuid, output_device.clone()).await {
             Ok(_) => {
-                info!("🔊 Started audio playback for call {}", call_id);
+                info!("🔊 Started audio playback for call {} using device: {}", call_id, output_device.info().name);
+                info!("🔊 Audio format: {:?}", config.preferred_format);
             }
             Err(e) => {
                 error!("❌ Failed to start playback for call {}: {}", call_id, e);
@@ -174,7 +175,8 @@ impl AudioManager {
         // Start capture (for sending audio to remote party)
         match self.device_manager.start_capture(&call_uuid, input_device.clone()).await {
             Ok(_) => {
-                info!("🎤 Started audio capture for call {}", call_id);
+                info!("🎤 Started audio capture for call {} using device: {}", call_id, input_device.info().name);
+                info!("🎤 Audio format: {:?}", config.preferred_format);
             }
             Err(e) => {
                 error!("❌ Failed to start capture for call {}: {}", call_id, e);

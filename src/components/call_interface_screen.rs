@@ -15,41 +15,47 @@ pub fn CallInterfaceScreen(
     on_logout: EventHandler<()>
 ) -> Element {
     // Timer to update call duration every second
-    use_effect(use_reactive!(|current_call| {
-        let current_call = current_call.clone();
+    use_effect(move || {
+        // Read the current call state - this makes the effect reactive to changes
+        let call_state = current_call.read().clone();
         
         // Only start timer if we have a connected call
-        if let Some(call) = current_call.read().as_ref() {
+        if let Some(call) = call_state {
             if matches!(call.state, crate::sip_client::CallState::Connected) {
-                spawn(async move {
-                    loop {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                        
-                        // Update call duration for connected calls
-                        let call_data = current_call.read().clone();
-                        if let Some(mut call) = call_data {
-                            if matches!(call.state, crate::sip_client::CallState::Connected) {
-                                if let Some(connected_time) = call.connected_at {
-                                    let now = chrono::Utc::now();
-                                    let duration = now.signed_duration_since(connected_time);
-                                    if let Ok(std_duration) = duration.to_std() {
-                                        call.duration = Some(std_duration);
-                                        current_call.set(Some(call));
+                if let Some(_connected_time) = call.connected_at {
+                    // Clone current_call for the async task
+                    let mut current_call_clone = current_call.clone();
+                    
+                    spawn(async move {
+                        loop {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                            
+                            // Check if call is still connected
+                            let call_data = current_call_clone.read().clone();
+                            if let Some(mut call) = call_data {
+                                if matches!(call.state, crate::sip_client::CallState::Connected) {
+                                    if let Some(connected_time) = call.connected_at {
+                                        let now = chrono::Utc::now();
+                                        let duration = now.signed_duration_since(connected_time);
+                                        if let Ok(std_duration) = duration.to_std() {
+                                            call.duration = Some(std_duration);
+                                            current_call_clone.set(Some(call));
+                                        }
                                     }
+                                } else {
+                                    // Call is no longer connected, break the timer loop
+                                    break;
                                 }
                             } else {
-                                // Call is no longer connected, break the timer loop
+                                // No active call, break the timer loop
                                 break;
                             }
-                        } else {
-                            // No active call, break the timer loop
-                            break;
                         }
-                    }
-                });
+                    });
+                }
             }
         }
-    }));
+    });
     rsx! {
         div {
             style: "display: flex; flex-direction: column; gap: 24px;",

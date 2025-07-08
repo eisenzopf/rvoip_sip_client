@@ -1,5 +1,4 @@
 // Re-export for module users
-pub use anyhow::Result;
 
 pub mod device_manager;
 pub mod audio_controls;
@@ -10,7 +9,7 @@ pub use audio_controls::AudioControls;
 // Re-export commonly used types from rvoip
 pub use rvoip::client_core::audio::{
     AudioDeviceManager, AudioDevice, AudioDeviceInfo, AudioDirection, 
-    AudioFormat, AudioError, AudioResult, PlaybackSession, CaptureSession
+    AudioFormat
 };
 
 /// Audio configuration for the SIP client
@@ -44,7 +43,7 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            preferred_format: AudioFormat::default_voip(), // 8000 Hz, 1 channel, 16-bit
+            preferred_format: AudioFormat::wideband_voip(), // 16000 Hz, 1 channel, 16-bit - better for VoIP
             echo_cancellation: true,
             noise_suppression: true,
             auto_gain_control: true,
@@ -132,6 +131,13 @@ impl AudioConfig {
     
     /// Get high-quality audio format for testing
     pub fn high_quality_format() -> AudioFormat {
+        AudioFormat::wideband_voip() // 16000 Hz, 1 channel, 16-bit
+    }
+    
+    /// Get Opus-compatible audio format
+    pub fn opus_compatible_format() -> AudioFormat {
+        // Try to create a format that's more compatible with Opus
+        // Opus typically uses 48000 Hz, but we'll use 16000 as a compromise
         AudioFormat::wideband_voip() // 16000 Hz, 1 channel, 16-bit
     }
 }
