@@ -298,13 +298,6 @@ pub fn App() -> Element {
         }
     };
 
-    // Simulate incoming call (for testing)
-    let simulate_incoming_call = move |_| {
-        app_state.set(AppState::IncomingCall { 
-            caller_id: "sip:caller@example.com".to_string() 
-        });
-    };
-
     // Answer incoming call
     let answer_call = move |_| {
         let client = sip_client.clone();
@@ -448,7 +441,6 @@ pub fn App() -> Element {
                             sip_client: sip_client,
                             on_make_call: make_call,
                             on_hangup_call: hangup_call,
-                            on_simulate_incoming: simulate_incoming_call,
                             on_logout: logout
                         }
                     },

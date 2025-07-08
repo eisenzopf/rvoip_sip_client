@@ -12,35 +12,44 @@ pub fn CallInterfaceScreen(
     sip_client: Signal<Arc<tokio::sync::RwLock<SipClientManager>>>,
     on_make_call: EventHandler<()>,
     on_hangup_call: EventHandler<()>,
-    on_simulate_incoming: EventHandler<()>,
     on_logout: EventHandler<()>
 ) -> Element {
     // Timer to update call duration every second
-    use_future(move || {
-        async move {
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                
-                // Update call duration for connected calls
-                let call_data = current_call.read().clone();
-                if let Some(mut call) = call_data {
-                    if matches!(call.state, crate::sip_client::CallState::Connected) {
-                        if let Some(connected_time) = call.connected_at {
-                            let now = chrono::Utc::now();
-                            let duration = now.signed_duration_since(connected_time);
-                            if let Ok(std_duration) = duration.to_std() {
-                                call.duration = Some(std_duration);
-                                current_call.set(Some(call));
+    use_effect(use_reactive!(|current_call| {
+        let current_call = current_call.clone();
+        
+        // Only start timer if we have a connected call
+        if let Some(call) = current_call.read().as_ref() {
+            if matches!(call.state, crate::sip_client::CallState::Connected) {
+                spawn(async move {
+                    loop {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        
+                        // Update call duration for connected calls
+                        let call_data = current_call.read().clone();
+                        if let Some(mut call) = call_data {
+                            if matches!(call.state, crate::sip_client::CallState::Connected) {
+                                if let Some(connected_time) = call.connected_at {
+                                    let now = chrono::Utc::now();
+                                    let duration = now.signed_duration_since(connected_time);
+                                    if let Ok(std_duration) = duration.to_std() {
+                                        call.duration = Some(std_duration);
+                                        current_call.set(Some(call));
+                                    }
+                                }
+                            } else {
+                                // Call is no longer connected, break the timer loop
+                                break;
                             }
+                        } else {
+                            // No active call, break the timer loop
+                            break;
                         }
                     }
-                } else {
-                    // No active call, break the timer loop
-                    break;
-                }
+                });
             }
         }
-    });
+    }));
     rsx! {
         div {
             style: "display: flex; flex-direction: column; gap: 24px;",
@@ -161,22 +170,6 @@ pub fn CallInterfaceScreen(
                         ",
                         onclick: move |_| on_make_call.call(()),
                         "Make Call"
-                    }
-                    
-                    // Debug button to simulate incoming call
-                    button {
-                        style: "
-                            padding: 12px 16px;
-                            background: #64748B;
-                            color: white;
-                            border: none;
-                            border-radius: 6px;
-                            font-size: 0.75rem;
-                            font-weight: 500;
-                            cursor: pointer;
-                        ",
-                        onclick: move |_| on_simulate_incoming.call(()),
-                        "Simulate Incoming"
                     }
                 }
             }
