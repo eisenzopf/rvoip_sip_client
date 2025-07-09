@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 
 // Import rvoip client-core types
 use rvoip::client_core::{
-    ClientManager, ClientConfig, 
+    ClientManager, ClientConfig, MediaConfig,
     registration::RegistrationConfig,
 };
 use crate::event_handler::DioxusEventHandler;
@@ -59,10 +59,39 @@ impl SipConfig {
             "127.0.0.1"
         };
         
+        // Create media configuration optimized for the server's audio format
+        let media_config = MediaConfig {
+            // Prefer Opus first (server uses Opus), then fallback to G.711
+            preferred_codecs: vec![
+                "opus".to_string(),
+                "PCMU".to_string(),
+                "PCMA".to_string(),
+            ],
+            // Enable full audio processing to help with audio quality
+            dtmf_enabled: true,
+            echo_cancellation: true,
+            noise_suppression: true,
+            auto_gain_control: true,
+            // Set reasonable bandwidth limit to prevent overload
+            max_bandwidth_kbps: Some(128),
+            // Disable SRTP for now to avoid additional complexity
+            require_srtp: false,
+            srtp_profiles: vec![],
+            // Use wider RTP port range for better NAT traversal
+            rtp_port_start: 10000,
+            rtp_port_end: 20000,
+            // Use 20ms packetization time (standard for VoIP)
+            preferred_ptime: Some(20),
+            // No custom SDP attributes needed
+            custom_sdp_attributes: std::collections::HashMap::new(),
+        };
+        
         let client_config = ClientConfig::new()
             .with_sip_addr(format!("{}:{}", bind_host, self.local_port).parse()?)
             .with_media_addr(format!("{}:0", bind_host).parse()?)
-            .with_user_agent("RVoIP SIP Client/1.0".to_string());
+            .with_user_agent("RVoIP SIP Client/1.0".to_string())
+            .with_media(media_config)
+            .with_max_calls(5); // Reasonable concurrent call limit
         
         Ok(client_config)
     }
