@@ -9,7 +9,7 @@ dioxus = { version = "0.6.3", features = ["desktop"] }
 dioxus-logger = "0.5"
 
 # RVOIP - Modern Rust VoIP Stack (using local copy with audio buffer fixes)
-rvoip = "0.1.12"
+rvoip = "0.1.13"
 
 # Additional dependencies for async and networking
 tokio = { version = "1.0", features = ["full"] }
