@@ -8,75 +8,37 @@ pub fn IncomingCallScreen(
 ) -> Element {
     rsx! {
         div {
-            style: "
-                background: white;
-                border-radius: 12px;
-                padding: 48px 32px;
-                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-                border: 1px solid #E2E8F0;
-                text-align: center;
-                animation: pulse 2s infinite;
-            ",
+            class: "bg-white rounded-xl p-12 shadow-lg border border-gray-200 text-center animate-pulse",
             
             div {
-                style: "margin-bottom: 32px;",
+                class: "mb-8",
                 
                 h2 {
-                    style: "
-                        font-size: 1.75rem;
-                        font-weight: 500;
-                        color: #1E293B;
-                        margin: 0 0 16px 0;
-                    ",
+                    class: "text-2xl font-medium text-gray-800 mb-4",
                     "Incoming Call"
                 }
                 
                 p {
-                    style: "
-                        font-size: 1.125rem;
-                        color: #059669;
-                        margin: 0;
-                        font-weight: 500;
-                    ",
+                    class: "text-lg text-green-600 font-medium",
                     "{caller_id}"
                 }
             }
             
             div {
-                style: "display: flex; gap: 16px; justify-content: center;",
+                class: "flex gap-4 justify-center",
                 
                 button {
-                    style: "
-                        padding: 16px 24px;
-                        background: #059669;
-                        color: white;
-                        border: none;
-                        border-radius: 8px;
-                        font-size: 1rem;
-                        font-weight: 500;
-                        cursor: pointer;
-                        min-width: 120px;
-                    ",
+                    class: "px-6 py-4 bg-green-600 hover:bg-green-700 text-white rounded-lg text-base font-medium cursor-pointer min-w-[120px] transition-colors",
                     onclick: move |_| on_answer.call(()),
                     "Answer"
                 }
                 
                 button {
-                    style: "
-                        padding: 16px 24px;
-                        background: #DC2626;
-                        color: white;
-                        border: none;
-                        border-radius: 8px;
-                        font-size: 1rem;
-                        font-weight: 500;
-                        cursor: pointer;
-                        min-width: 120px;
-                    ",
+                    class: "px-6 py-4 bg-red-600 hover:bg-red-700 text-white rounded-lg text-base font-medium cursor-pointer min-w-[120px] transition-colors",
                     onclick: move |_| on_ignore.call(()),
                     "Ignore"
                 }
             }
         }
     }
-} 
+}

@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
-use crate::sip_client::{CallInfo, SipClientManager};
+use crate::sip_client::{CallInfo, SipClientManager, CallState};
 
 #[component]
 pub fn CallInterfaceScreen(
@@ -16,6 +16,28 @@ pub fn CallInterfaceScreen(
     // Determine connection mode based on server_uri
     let is_p2p_mode = server_uri.contains('@');
     let is_receiver_mode = server_uri.is_empty();
+    
+    // Get listening address for receiver mode
+    let listening_address = use_signal(|| "Loading...".to_string());
+    
+    // Fetch listening address on mount if in receiver mode
+    if is_receiver_mode {
+        use_effect({
+            let sip_client = sip_client.clone();
+            let mut listening_address = listening_address.clone();
+            move || {
+                spawn(async move {
+                    let client = sip_client.read().clone();
+                    let guard = client.read().await;
+                    if let Some(addr) = guard.get_listening_address() {
+                        listening_address.set(addr);
+                    } else {
+                        listening_address.set("Not available".to_string());
+                    }
+                });
+            }
+        });
+    }
     // Timer to update call duration every second
     use_effect(move || {
         // Read the current call state - this makes the effect reactive to changes
@@ -23,7 +45,7 @@ pub fn CallInterfaceScreen(
         
         // Only start timer if we have a connected call
         if let Some(call) = call_state {
-            if matches!(call.state, crate::sip_client::CallState::Connected) {
+            if matches!(call.state, CallState::Connected) {
                 if let Some(_connected_time) = call.connected_at {
                     // Clone current_call for the async task
                     let mut current_call_clone = current_call.clone();
@@ -35,7 +57,7 @@ pub fn CallInterfaceScreen(
                             // Check if call is still connected
                             let call_data = current_call_clone.read().clone();
                             if let Some(mut call) = call_data {
-                                if matches!(call.state, crate::sip_client::CallState::Connected) {
+                                if matches!(call.state, CallState::Connected) {
                                     if let Some(connected_time) = call.connected_at {
                                         let now = chrono::Utc::now();
                                         let duration = now.signed_duration_since(connected_time);
@@ -58,28 +80,27 @@ pub fn CallInterfaceScreen(
             }
         }
     });
+    
+    // Check if we have an active call
+    let has_active_call = current_call.read().is_some();
+    let call_info = current_call.read().clone();
     rsx! {
         div {
-            style: "display: flex; flex-direction: column; gap: 24px;",
+            class: "flex flex-col gap-6",
             
             // User info bar
             div {
-                style: "
-                    background: white;
-                    border-radius: 12px;
-                    padding: 16px 24px;
-                    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-                    border: 1px solid #E2E8F0;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                ",
+                class: "bg-white rounded-xl px-6 py-4 shadow-sm border border-gray-200 flex justify-between items-center",
                 
                 div {
                     div {
-                        style: "font-weight: 500; color: #1E293B; font-size: 0.875rem;",
+                        class: "font-medium text-gray-800 text-sm",
                         if is_receiver_mode {
-                            "Receiver Mode - {username}"
+                            span {
+                                class: "inline-flex items-center gap-2",
+                                span { class: "w-2 h-2 bg-green-500 rounded-full animate-pulse" }
+                                "Receiver Mode - {username}"
+                            }
                         } else if is_p2p_mode {
                             "P2P Mode - {username}"
                         } else {
@@ -87,23 +108,9 @@ pub fn CallInterfaceScreen(
                         }
                     }
                     div {
-                        style: "color: #64748B; font-size: 0.75rem; margin-top: 2px;",
+                        class: "text-gray-500 text-xs mt-0.5",
                         if is_receiver_mode {
-                            // Show the listening address
-                            {
-                                let sip_client_guard = sip_client.read();
-                                let client = sip_client_guard.clone();
-                                let mut address = use_signal(|| "".to_string());
-                                
-                                spawn(async move {
-                                    let guard = client.read().await;
-                                    if let Some(addr) = guard.get_listening_address() {
-                                        address.set(addr);
-                                    }
-                                });
-                                
-                                format!("Listening on: {}", address.read())
-                            }
+                            "Listening on: {listening_address}"
                         } else if is_p2p_mode {
                             "Direct to: {server_uri}"
                         } else {
@@ -113,16 +120,7 @@ pub fn CallInterfaceScreen(
                 }
                 
                 button {
-                    style: "
-                        padding: 8px 16px;
-                        background: #DC2626;
-                        color: white;
-                        border: none;
-                        border-radius: 6px;
-                        font-size: 0.75rem;
-                        font-weight: 500;
-                        cursor: pointer;
-                    ",
+                    class: "px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs font-medium transition-colors",
                     onclick: move |_| on_logout.call(()),
                     "Disconnect"
                 }
@@ -130,189 +128,172 @@ pub fn CallInterfaceScreen(
             
             // Call interface
             div {
-                style: "
-                    background: white;
-                    border-radius: 12px;
-                    padding: 32px;
-                    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-                    border: 1px solid #E2E8F0;
-                ",
+                class: "bg-white rounded-xl p-8 shadow-sm border border-gray-200",
                 
-                div {
-                    style: "
-                        margin-bottom: 24px;
-                        padding-bottom: 16px;
-                        border-bottom: 1px solid #F1F5F9;
-                    ",
-                    
-                    h2 {
-                        style: "
-                            font-size: 1.25rem;
-                            font-weight: 500;
-                            color: #1E293B;
-                            margin: 0;
-                        ",
-                        "Make a Call"
-                    }
-                }
-                
-                div {
-                    style: "margin-bottom: 24px;",
-                    
-                    label {
-                        style: "
-                            display: block;
-                            font-size: 0.875rem;
-                            font-weight: 500;
-                            color: #374151;
-                            margin-bottom: 8px;
-                        ",
-                        "Call Destination"
-                    }
-                    input {
-                        style: "
-                            width: 100%;
-                            padding: 12px 16px;
-                            border: 1px solid #D1D5DB;
-                            border-radius: 6px;
-                            font-size: 0.875rem;
-                            background: white;
-                            color: #374151;
-                            box-sizing: border-box;
-                        ",
-                        r#type: "text",
-                        placeholder: if is_p2p_mode { 
-                            "Enter name (e.g., alice) or full URI" 
-                        } else { 
-                            "sip:user@example.com" 
-                        },
-                        value: "{call_target}",
-                        oninput: move |evt| call_target.set(evt.value())
-                    }
-                }
-                
-                div {
-                    style: "display: flex; gap: 12px;",
-                    
-                    button {
-                        style: "
-                            flex: 1;
-                            padding: 12px 16px;
-                            background: #059669;
-                            color: white;
-                            border: none;
-                            border-radius: 6px;
-                            font-size: 0.875rem;
-                            font-weight: 500;
-                            cursor: pointer;
-                        ",
-                        onclick: move |_| on_make_call.call(()),
-                        "Make Call"
+                // Only show call input if not in an active call
+                if !has_active_call {
+                    div {
+                        div {
+                            class: "mb-6 pb-4 border-b border-gray-100",
+                            
+                            h2 {
+                                class: "text-xl font-medium text-gray-800",
+                                "Make a Call"
+                            }
+                        }
+                        
+                        div {
+                            class: "mb-6",
+                            
+                            label {
+                                class: "block text-sm font-medium text-gray-700 mb-2",
+                                "Call Destination"
+                            }
+                            input {
+                                class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 outline-none transition-colors",
+                                r#type: "text",
+                                placeholder: if is_p2p_mode { 
+                                    "Enter name (e.g., alice) or full URI" 
+                                } else if is_receiver_mode {
+                                    "Enter caller URI (e.g., alice@192.168.1.100)"
+                                } else { 
+                                    "sip:user@example.com" 
+                                },
+                                value: "{call_target}",
+                                oninput: move |evt| call_target.set(evt.value()),
+                                disabled: has_active_call
+                            }
+                        }
+                        
+                        div {
+                            class: "flex gap-3",
+                            
+                            button {
+                                class: "flex-1 px-4 py-3 bg-green-600 hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed text-white rounded-md text-sm font-medium transition-colors",
+                                onclick: move |_| on_make_call.call(()),
+                                disabled: has_active_call || call_target.read().is_empty(),
+                                "Make Call"
+                            }
+                        }
                     }
                 }
             }
             
             // Current call status
-            if let Some(call) = current_call.read().as_ref() {
+            if let Some(call) = &call_info {
                 div {
-                    style: "
-                        background: #F3F4F6;
-                        border-radius: 12px;
-                        padding: 24px;
-                        border: 1px solid #E5E7EB;
-                    ",
+                    class: "bg-gray-50 rounded-xl p-6 border border-gray-200",
                     
                     h3 {
-                        style: "
-                            font-size: 1.125rem;
-                            font-weight: 500;
-                            color: #1F2937;
-                            margin: 0 0 16px 0;
-                        ",
-                        "Current Call"
+                        class: "text-lg font-medium text-gray-800 mb-4",
+                        "Active Call"
                     }
                     
                     div {
-                        style: "margin-bottom: 16px;",
+                        class: "space-y-3 mb-6",
                         
                         div {
-                            style: "
-                                display: flex;
-                                justify-content: space-between;
-                                margin-bottom: 8px;
-                            ",
+                            class: "flex justify-between items-center",
                             span {
-                                style: "color: #6B7280; font-size: 0.875rem;",
-                                "Destination:"
+                                class: "text-gray-600 text-sm",
+                                "Remote Party:"
                             }
                             span {
-                                style: "color: #1F2937; font-size: 0.875rem; font-weight: 500;",
+                                class: "text-gray-800 text-sm font-medium",
                                 "{call.remote_uri}"
                             }
                         }
                         
                         div {
-                            style: "
-                                display: flex;
-                                justify-content: space-between;
-                                margin-bottom: 8px;
-                            ",
+                            class: "flex justify-between items-center",
                             span {
-                                style: "color: #6B7280; font-size: 0.875rem;",
+                                class: "text-gray-600 text-sm",
                                 "Status:"
                             }
                             span {
-                                style: "
-                                    color: #1F2937; 
-                                    font-size: 0.875rem; 
-                                    font-weight: 500;
-                                    padding: 2px 8px;
-                                    background: #10B981;
-                                    color: white;
-                                    border-radius: 4px;
-                                    font-size: 0.75rem;
-                                ",
-                                "{call.state:?}"
+                                class: {
+                                    let base = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ";
+                                    match call.state {
+                                        CallState::Calling => format!("{} bg-yellow-100 text-yellow-800", base),
+                                        CallState::Ringing => format!("{} bg-blue-100 text-blue-800 animate-pulse", base),
+                                        CallState::Connected => format!("{} bg-green-100 text-green-800", base),
+                                        CallState::Terminated => format!("{} bg-gray-100 text-gray-800", base),
+                                        _ => format!("{} bg-gray-100 text-gray-800", base),
+                                    }
+                                },
+                                match call.state {
+                                    CallState::Calling => "Calling...",
+                                    CallState::Ringing => "Ringing...",
+                                    CallState::Connected => "Connected",
+                                    CallState::Terminated => "Ended",
+                                    _ => "Unknown",
+                                }
                             }
                         }
                         
-                        if let Some(duration) = &call.duration {
-                            div {
-                                style: "
-                                    display: flex;
-                                    justify-content: space-between;
-                                    margin-bottom: 8px;
-                                ",
-                                span {
-                                    style: "color: #6B7280; font-size: 0.875rem;",
-                                    "Duration:"
-                                }
-                                span {
-                                    style: "color: #1F2937; font-size: 0.875rem; font-weight: 500;",
-                                    "{duration.as_secs() / 60:02}:{duration.as_secs() % 60:02}"
+                        if matches!(call.state, CallState::Connected) {
+                            if let Some(duration) = &call.duration {
+                                div {
+                                    class: "flex justify-between items-center",
+                                    span {
+                                        class: "text-gray-600 text-sm",
+                                        "Duration:"
+                                    }
+                                    span {
+                                        class: "text-gray-800 text-sm font-medium font-mono",
+                                        "{duration.as_secs() / 60:02}:{duration.as_secs() % 60:02}"
+                                    }
                                 }
                             }
                         }
                     }
                     
                     button {
-                        style: "
-                            width: 100%;
-                            padding: 12px 16px;
-                            background: #DC2626;
-                            color: white;
-                            border: none;
-                            border-radius: 6px;
-                            font-size: 0.875rem;
-                            font-weight: 500;
-                            cursor: pointer;
-                        ",
+                        class: "w-full px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-md text-sm font-medium transition-colors",
                         onclick: move |_| on_hangup_call.call(()),
-                        "Hang Up"
+                        disabled: matches!(call.state, CallState::Terminated),
+                        if matches!(call.state, CallState::Ringing) {
+                            "Reject"
+                        } else {
+                            "Hang Up"
+                        }
                     }
                 }
             }
             
+            // Status messages for receiver mode when no active call
+            if is_receiver_mode && !has_active_call {
+                div {
+                    class: "bg-blue-50 border border-blue-200 rounded-xl p-4",
+                    div {
+                        class: "flex items-center gap-3",
+                        svg {
+                            class: "w-5 h-5 text-blue-600 flex-shrink-0",
+                            fill: "none",
+                            stroke: "currentColor",
+                            viewBox: "0 0 24 24",
+                            xmlns: "http://www.w3.org/2000/svg",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                stroke_width: "2",
+                                d: "M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
+                            }
+                        }
+                        div {
+                            class: "text-sm text-blue-800",
+                            p {
+                                class: "font-medium",
+                                "Ready to receive calls"
+                            }
+                            p {
+                                class: "text-xs text-blue-600 mt-0.5",
+                                "Share your listening address with others to receive calls"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 } 

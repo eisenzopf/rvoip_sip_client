@@ -266,13 +266,14 @@ pub fn App() -> Element {
                 match client.answer_call().await {
                     Ok(_) => {
                         info!("Call answered");
-                        app_state.set(AppState::CallInterface);
                     }
                     Err(e) => {
                         error!("Failed to answer call: {}", e);
                         error_message.set(Some(format!("Failed to answer call: {}", e)));
                     }
                 }
+                // Always return to call interface screen after making a choice
+                app_state.set(AppState::CallInterface);
             });
         }
     };
