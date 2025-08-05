@@ -1,98 +1,158 @@
-use tokio::sync::mpsc;
-use rvoip::client_core::events::{
-    ClientEventHandler, IncomingCallInfo, CallAction, CallStatusInfo, 
-    RegistrationStatusInfo, MediaEventInfo
-};
-use rvoip::client_core::error::ClientError;
-use rvoip::client_core::call::CallId;
-use log::{info, error};
+use dioxus::prelude::*;
+use log::info;
 
-/// Event message types for bridging rvoip events with Dioxus state
+use rvoip::sip_client::prelude::*;
+
 #[derive(Debug, Clone)]
-pub enum EventMessage {
-    IncomingCall(IncomingCallInfo),
-    CallStateChanged(CallStatusInfo),
-    RegistrationStatusChanged(RegistrationStatusInfo),
-    MediaEvent(MediaEventInfo),
-    ClientError(ClientError, Option<CallId>),
-    NetworkEvent(bool, Option<String>),
+pub struct CallEvent {
+    pub call_id: String,
+    pub event_type: CallEventType,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
-/// Event handler that bridges rvoip-client-core events with Dioxus state
-/// 
-/// This handler receives events from the rvoip client and sends them via
-/// a channel to the Dioxus UI thread for processing.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
+pub enum CallEventType {
+    IncomingCall { from: String, display_name: Option<String> },
+    CallConnected { codec: String },
+    CallEnded,
+    CallStateChanged { state: CallState },
+    AudioLevelChanged { direction: AudioDirection, level: f32 },
+    DtmfSent { digits: String },
+    Error { message: String },
+}
+
 pub struct DioxusEventHandler {
-    /// Channel sender for event messages
-    event_sender: mpsc::UnboundedSender<EventMessage>,
+    pub events: Signal<Vec<CallEvent>>,
+    pub incoming_call: Signal<Option<(String, String)>>, // (call_id, from)
+    pub call_connected: Signal<bool>,
+    pub call_ended: Signal<bool>,
+    pub audio_levels: Signal<(f32, f32)>, // (input_level, output_level)
 }
 
 impl DioxusEventHandler {
-    /// Create a new event handler with the provided channel sender
-    pub fn new(event_sender: mpsc::UnboundedSender<EventMessage>) -> Self {
+    pub fn new() -> Self {
         Self {
-            event_sender,
+            events: Signal::new(Vec::new()),
+            incoming_call: Signal::new(None),
+            call_connected: Signal::new(false),
+            call_ended: Signal::new(false),
+            audio_levels: Signal::new((0.0, 0.0)),
+        }
+    }
+    
+    pub async fn handle_sip_event(&self, event: &SipClientEvent) {
+        match event {
+            SipClientEvent::IncomingCall { call, from, display_name } => {
+                info!("Incoming call from: {} ({})", from, display_name.as_ref().unwrap_or(&"Unknown".to_string()));
+                
+                let call_event = CallEvent {
+                    call_id: call.id.to_string(),
+                    event_type: CallEventType::IncomingCall {
+                        from: from.clone(),
+                        display_name: display_name.clone(),
+                    },
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                self.events.write().push(call_event);
+                *self.incoming_call.write() = Some((call.id.to_string(), from.clone()));
+            }
+            
+            SipClientEvent::CallConnected { call_id, codec, .. } => {
+                info!("Call connected with codec: {:?}", codec);
+                
+                let call_event = CallEvent {
+                    call_id: call_id.to_string(),
+                    event_type: CallEventType::CallConnected {
+                        codec: codec.clone(),
+                    },
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                self.events.write().push(call_event);
+                *self.call_connected.write() = true;
+            }
+            
+            SipClientEvent::CallEnded { call } => {
+                info!("Call ended: {}", call.id);
+                
+                let call_event = CallEvent {
+                    call_id: call.id.to_string(),
+                    event_type: CallEventType::CallEnded,
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                self.events.write().push(call_event);
+                *self.call_ended.write() = true;
+                *self.call_connected.write() = false;
+                *self.incoming_call.write() = None;
+            }
+            
+            SipClientEvent::CallStateChanged { call, new_state, .. } => {
+                info!("Call state changed to: {:?}", new_state);
+                
+                let call_event = CallEvent {
+                    call_id: call.id.to_string(),
+                    event_type: CallEventType::CallStateChanged {
+                        state: new_state.clone(),
+                    },
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                self.events.write().push(call_event);
+                
+                // Update connected state based on new state
+                match new_state {
+                    CallState::Connected => {
+                        *self.call_connected.write() = true;
+                    }
+                    CallState::Terminated => {
+                        *self.call_connected.write() = false;
+                        *self.call_ended.write() = true;
+                    }
+                    _ => {}
+                }
+            }
+            
+            SipClientEvent::AudioLevelChanged { direction, level, .. } => {
+                let mut levels = self.audio_levels.write();
+                match direction {
+                    AudioDirection::Input => levels.0 = *level,
+                    AudioDirection::Output => levels.1 = *level,
+                }
+            }
+            
+            SipClientEvent::DtmfSent { call, digits } => {
+                info!("DTMF sent: {}", digits);
+                
+                let call_event = CallEvent {
+                    call_id: call.id.to_string(),
+                    event_type: CallEventType::DtmfSent {
+                        digits: digits.clone(),
+                    },
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                self.events.write().push(call_event);
+            }
+            
+            SipClientEvent::Error { message, .. } => {
+                info!("Error: {}", message);
+                
+                let call_event = CallEvent {
+                    call_id: String::new(), // Error might not have a specific call ID
+                    event_type: CallEventType::Error {
+                        message: message.clone(),
+                    },
+                    timestamp: chrono::Utc::now(),
+                };
+                
+                self.events.write().push(call_event);
+            }
+            
+            _ => {
+                // Handle other events as needed
+            }
         }
     }
 }
-
-#[async_trait::async_trait]
-impl ClientEventHandler for DioxusEventHandler {
-    async fn on_incoming_call(&self, call_info: IncomingCallInfo) -> CallAction {
-        info!("Incoming call from: {}", call_info.caller_uri);
-        
-        // Send event to Dioxus UI thread
-        if let Err(e) = self.event_sender.send(EventMessage::IncomingCall(call_info)) {
-            error!("Failed to send incoming call event: {}", e);
-        }
-        
-        // For now, let the user decide - later we can add auto-answer logic
-        CallAction::Ignore
-    }
-    
-    async fn on_call_state_changed(&self, status_info: CallStatusInfo) {
-        info!("Call {} state changed to {:?}", status_info.call_id, status_info.new_state);
-        
-        // Send event to Dioxus UI thread
-        if let Err(e) = self.event_sender.send(EventMessage::CallStateChanged(status_info)) {
-            error!("Failed to send call state changed event: {}", e);
-        }
-    }
-    
-    async fn on_registration_status_changed(&self, status_info: RegistrationStatusInfo) {
-        info!("Registration status changed: {:?}", status_info.status);
-        
-        // Send event to Dioxus UI thread
-        if let Err(e) = self.event_sender.send(EventMessage::RegistrationStatusChanged(status_info)) {
-            error!("Failed to send registration status changed event: {}", e);
-        }
-    }
-    
-    async fn on_media_event(&self, media_info: MediaEventInfo) {
-        info!("Media event: {:?}", media_info.event_type);
-        
-        // Send event to Dioxus UI thread
-        if let Err(e) = self.event_sender.send(EventMessage::MediaEvent(media_info)) {
-            error!("Failed to send media event: {}", e);
-        }
-    }
-    
-    async fn on_client_error(&self, error: ClientError, call_id: Option<CallId>) {
-        error!("Client error: {} (call_id: {:?})", error, call_id);
-        
-        // Send event to Dioxus UI thread
-        if let Err(e) = self.event_sender.send(EventMessage::ClientError(error, call_id)) {
-            error!("Failed to send client error event: {}", e);
-        }
-    }
-    
-    async fn on_network_event(&self, connected: bool, reason: Option<String>) {
-        info!("Network event: connected={}, reason={:?}", connected, reason);
-        
-        // Send event to Dioxus UI thread
-        if let Err(e) = self.event_sender.send(EventMessage::NetworkEvent(connected, reason)) {
-            error!("Failed to send network event: {}", e);
-        }
-    }
-} 

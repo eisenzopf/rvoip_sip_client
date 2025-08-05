@@ -1,7 +1,6 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
 use crate::sip_client::{CallInfo, SipClientManager};
-use super::AudioControls;
 
 #[component]
 pub fn CallInterfaceScreen(
@@ -281,11 +280,6 @@ pub fn CallInterfaceScreen(
                 }
             }
             
-            // Audio controls
-            AudioControls {
-                sip_client: sip_client,
-                call_id: current_call.read().as_ref().map(|c| c.id.clone())
-            }
         }
     }
 } 

@@ -2,8 +2,7 @@ use log::info;
 
 mod sip_client;
 mod components;
-mod event_handler;
-mod audio;
+mod event_channel;
 
 use components::App;
 

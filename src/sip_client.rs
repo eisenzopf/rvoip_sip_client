@@ -2,15 +2,10 @@ use anyhow::Result;
 use log::{info, error};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
-// Import rvoip client-core types
-use rvoip::client_core::{
-    ClientManager, ClientConfig, MediaConfig,
-    registration::RegistrationConfig,
-};
-use crate::event_handler::DioxusEventHandler;
-use crate::audio::{AudioConfig, AudioManager, AudioControls};
+// Import rvoip sip-client types
+use rvoip::sip_client::{SipClient, SipClientBuilder, SipClientEvent, AudioDirection, CallId, CallState as SipCallState};
 
 #[derive(Debug, Clone)]
 pub struct SipConfig {
@@ -19,7 +14,6 @@ pub struct SipConfig {
     pub server_uri: String,
     pub local_port: u16,
     pub display_name: Option<String>,
-    pub audio_config: AudioConfig,
 }
 
 impl Default for SipConfig {
@@ -30,92 +24,7 @@ impl Default for SipConfig {
             server_uri: "sip:127.0.0.1:5060".to_string(),
             local_port: 5070,
             display_name: None,
-            audio_config: AudioConfig::default(),
         }
-    }
-}
-
-impl SipConfig {
-    /// Convert to rvoip-client-core ClientConfig
-    pub fn to_client_config(&self) -> Result<ClientConfig> {
-        // Parse the server URI to extract host
-        let host = if self.server_uri.starts_with("sip:") {
-            let uri_without_scheme = self.server_uri.strip_prefix("sip:").unwrap_or(&self.server_uri);
-            // Extract host part (everything before the port, if any)
-            let host_part = uri_without_scheme.split(':').next().unwrap_or("127.0.0.1");
-            // Remove any leading slashes
-            host_part.trim_start_matches("//")
-        } else {
-            // Fallback for non-SIP URIs
-            "127.0.0.1"
-        };
-        
-        // Validate that we have a reasonable host (use localhost if hostname provided)
-        let bind_host = if host.chars().next().unwrap_or('0').is_ascii_digit() {
-            // It's likely an IP address
-            host
-        } else {
-            // It's a hostname, use localhost for binding
-            "127.0.0.1"
-        };
-        
-        // Create media configuration optimized for the server's audio format
-        let media_config = MediaConfig {
-            // Prefer Opus first (server uses Opus), then fallback to G.711
-            preferred_codecs: vec![
-                "opus".to_string(),
-                "PCMU".to_string(),
-                "PCMA".to_string(),
-            ],
-            // Enable full audio processing to help with audio quality
-            dtmf_enabled: true,
-            echo_cancellation: true,
-            noise_suppression: true,
-            auto_gain_control: true,
-            // Set reasonable bandwidth limit to prevent overload
-            max_bandwidth_kbps: Some(128),
-            // Disable SRTP for now to avoid additional complexity
-            require_srtp: false,
-            srtp_profiles: vec![],
-            // Use wider RTP port range for better NAT traversal
-            rtp_port_start: 10000,
-            rtp_port_end: 20000,
-            // Use 20ms packetization time (standard for VoIP)
-            preferred_ptime: Some(20),
-            // No custom SDP attributes needed
-            custom_sdp_attributes: std::collections::HashMap::new(),
-        };
-        
-        let client_config = ClientConfig::new()
-            .with_sip_addr(format!("{}:{}", bind_host, self.local_port).parse()?)
-            .with_media_addr(format!("{}:0", bind_host).parse()?)
-            .with_user_agent("RVoIP SIP Client/1.0".to_string())
-            .with_media(media_config)
-            .with_max_calls(5); // Reasonable concurrent call limit
-        
-        Ok(client_config)
-    }
-    
-    /// Convert to rvoip-client-core RegistrationConfig
-    pub fn to_registration_config(&self) -> RegistrationConfig {
-        // Parse server URI to get domain
-        let domain = if self.server_uri.starts_with("sip:") {
-            let uri_without_scheme = self.server_uri.strip_prefix("sip:").unwrap_or(&self.server_uri);
-            // Extract host part (everything before the port, if any)
-            let host_part = uri_without_scheme.split(':').next().unwrap_or("localhost");
-            // Remove any leading slashes
-            host_part.trim_start_matches("//")
-        } else {
-            "localhost"
-        };
-        
-        RegistrationConfig::new(
-            self.server_uri.clone(),
-            format!("sip:{}@{}", self.username, domain),
-            format!("sip:{}@127.0.0.1:{}", self.username, self.local_port),
-        )
-        .with_credentials(self.username.clone(), self.password.clone())
-        .with_expires(3600)
     }
 }
 
@@ -131,6 +40,20 @@ pub enum CallState {
     Error(String),
 }
 
+impl From<SipCallState> for CallState {
+    fn from(state: SipCallState) -> Self {
+        match state {
+            SipCallState::Initiating => CallState::Calling,
+            SipCallState::Ringing => CallState::Ringing,
+            SipCallState::IncomingRinging => CallState::Ringing,
+            SipCallState::Connected => CallState::Connected,
+            SipCallState::OnHold => CallState::Connected, // Still connected but on hold
+            SipCallState::Transferring => CallState::Connected, // Still connected during transfer
+            SipCallState::Terminated => CallState::Disconnected,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CallInfo {
     pub id: String,
@@ -143,12 +66,11 @@ pub struct CallInfo {
 
 pub struct SipClientManager {
     config: SipConfig,
-    client: Option<Arc<ClientManager>>,
+    client: Option<SipClient>,
     registration_state: Arc<RwLock<CallState>>,
     current_call: Arc<RwLock<Option<CallInfo>>>,
-    event_handler: Option<Arc<DioxusEventHandler>>,
-    audio_manager: Option<Arc<AudioManager>>,
-    audio_controls: Option<Arc<AudioControls>>,
+    event_sender: Option<mpsc::UnboundedSender<SipClientEvent>>,
+    event_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SipClientManager {
@@ -158,75 +80,120 @@ impl SipClientManager {
             client: None,
             registration_state: Arc::new(RwLock::new(CallState::Idle)),
             current_call: Arc::new(RwLock::new(None)),
-            event_handler: None,
-            audio_manager: None,
-            audio_controls: None,
+            event_sender: None,
+            event_task: None,
         }
     }
 
     pub async fn initialize(&mut self) -> Result<()> {
         info!("Initializing SIP client with config: {:?}", self.config);
         
-        // Initialize audio manager first
-        info!("🎤 Initializing audio manager");
-        let audio_manager = Arc::new(AudioManager::new(self.config.audio_config.clone()).await?);
-        let audio_controls = Arc::new(AudioControls::new(audio_manager.clone()));
+        // Parse server URI to extract host
+        let server_host = if self.config.server_uri.starts_with("sip:") {
+            self.config.server_uri.strip_prefix("sip:").unwrap_or(&self.config.server_uri)
+        } else {
+            &self.config.server_uri
+        };
         
-        self.audio_manager = Some(audio_manager);
-        self.audio_controls = Some(audio_controls);
+        // Build SIP identity
+        let sip_identity = format!("sip:{}@{}", self.config.username, server_host);
         
-        // Convert our config to rvoip-client-core ClientConfig
-        let client_config = self.config.to_client_config()?;
-        
-        // Create the ClientManager
-        let client_manager = ClientManager::new(client_config).await?;
+        // Create SIP client using the builder
+        let client = SipClientBuilder::new()
+            .sip_identity(sip_identity.clone())
+            .local_address(format!("127.0.0.1:{}", self.config.local_port).parse()?)
+            .register(|reg| {
+                reg.credentials(self.config.username.clone(), self.config.password.clone())
+                   .expires(3600)
+            })
+            .build()
+            .await?;
         
         // Start the client
-        client_manager.start().await?;
+        client.start().await?;
         
-        self.client = Some(client_manager);
+        // Store the client
+        self.client = Some(client);
         
         info!("SIP client initialized successfully");
         Ok(())
     }
     
-    pub async fn register_event_handler(&mut self) -> Result<()> {
-        if let (Some(client), Some(handler)) = (&self.client, &self.event_handler) {
-            client.set_event_handler(handler.clone()).await;
-            info!("Event handler registered with rvoip client");
+    pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<SipClientEvent>) {
+        self.event_sender = Some(sender);
+    }
+    
+    pub async fn start_event_loop(&mut self) -> Result<()> {
+        if let Some(client) = &self.client {
+            // Start event processing task
+            let mut events = client.event_iter();
+            let current_call = self.current_call.clone();
+            let registration_state = self.registration_state.clone();
+            let event_sender = self.event_sender.clone();
+            
+            let task = tokio::spawn(async move {
+                while let Some(event) = events.next().await {
+                    // Send event to UI if sender is available
+                    if let Some(sender) = &event_sender {
+                        let _ = sender.send(event.clone());
+                    }
+                    
+                    // Update internal state based on events
+                    match &event {
+                        SipClientEvent::IncomingCall { call, from, .. } => {
+                            let call_info = CallInfo {
+                                id: call.id.to_string(),
+                                remote_uri: from.clone(),
+                                state: CallState::Ringing,
+                                duration: None,
+                                is_incoming: true,
+                                connected_at: None,
+                            };
+                            *current_call.write().await = Some(call_info);
+                        }
+                        SipClientEvent::CallStateChanged { call, new_state, .. } => {
+                            if let Some(info) = current_call.write().await.as_mut() {
+                                if info.id == call.id.to_string() {
+                                    info.state = CallState::from(new_state.clone());
+                                    if *new_state == SipCallState::Connected && info.connected_at.is_none() {
+                                        info.connected_at = Some(chrono::Utc::now());
+                                    }
+                                }
+                            }
+                        }
+                        SipClientEvent::CallEnded { call } => {
+                            let mut current = current_call.write().await;
+                            if let Some(info) = current.as_ref() {
+                                if info.id == call.id.to_string() {
+                                    *current = None;
+                                }
+                            }
+                        }
+                        SipClientEvent::RegistrationStatusChanged { status, .. } => {
+                            let state = match status.as_str() {
+                                "pending" => CallState::Registering,
+                                "active" => CallState::Registered,
+                                "failed" => CallState::Error("Registration failed".to_string()),
+                                _ => CallState::Idle,
+                            };
+                            *registration_state.write().await = state;
+                        }
+                        _ => {}
+                    }
+                }
+            });
+            
+            self.event_task = Some(task);
+            info!("Event loop started");
             Ok(())
         } else {
-            Err(anyhow::anyhow!("Client or event handler not available"))
+            Err(anyhow::anyhow!("Client not available"))
         }
     }
 
     pub async fn register(&mut self) -> Result<()> {
-        info!("Attempting to register with SIP server");
-        *self.registration_state.write().await = CallState::Registering;
-
-        if let Some(client) = &self.client {
-            // Create registration config using our helper method
-            let reg_config = self.config.to_registration_config();
-            
-            // Attempt registration
-            match client.register(reg_config).await {
-                Ok(_registration_id) => {
-                    info!("Registration successful");
-                    *self.registration_state.write().await = CallState::Registered;
-                }
-                Err(e) => {
-                    let error_msg = format!("Registration failed: {}", e);
-                    info!("{}", error_msg);
-                    *self.registration_state.write().await = CallState::Error(error_msg);
-                    return Err(e.into());
-                }
-            }
-        } else {
-            let error_msg = "Client not initialized";
-            *self.registration_state.write().await = CallState::Error(error_msg.to_string());
-            return Err(anyhow::anyhow!(error_msg));
-        }
-        
+        info!("Registration is automatic with SipClientBuilder when credentials are provided");
+        // Registration happens automatically when the client starts if credentials were provided
         Ok(())
     }
 
@@ -234,17 +201,13 @@ impl SipClientManager {
         info!("Making call to: {}", target_uri);
 
         if let Some(client) = &self.client {
-            // Create from URI based on our config
-            let from_uri = format!("sip:{}@{}", self.config.username, 
-                self.config.server_uri.split(':').nth(1).unwrap_or("localhost").trim_start_matches("//"));
-            
-            // Make the call using rvoip-client-core
-            match client.make_call(from_uri, target_uri.to_string(), None).await {
-                Ok(call_id) => {
+            // Make the call using the new API
+            match client.call(target_uri).await {
+                Ok(call) => {
                     let call_info = CallInfo {
-                        id: call_id.to_string(),
+                        id: call.id.to_string(),
                         remote_uri: target_uri.to_string(),
-                        state: CallState::Calling,
+                        state: CallState::from(*call.state.read()),
                         duration: None,
                         is_incoming: false,
                         connected_at: None,
@@ -252,19 +215,11 @@ impl SipClientManager {
 
                     *self.current_call.write().await = Some(call_info);
                     
-                    // Start audio for the call
-                    if let Some(audio_controls) = &self.audio_controls {
-                        audio_controls.set_current_call(Some(call_id.to_string())).await;
-                        if let Err(e) = audio_controls.start_audio().await {
-                            error!("Failed to start audio for call {}: {}", call_id, e);
-                        }
-                    }
-                    
-                    Ok(call_id.to_string())
+                    Ok(call.id.to_string())
                 }
                 Err(e) => {
                     let error_msg = format!("Make call failed: {}", e);
-                    info!("{}", error_msg);
+                    error!("{}", error_msg);
                     Err(e.into())
                 }
             }
@@ -278,24 +233,16 @@ impl SipClientManager {
             info!("Hanging up call: {}", call_info.id);
             
             if let Some(client) = &self.client {
-                // Parse the call ID back to UUID
-                if let Ok(call_id) = uuid::Uuid::parse_str(&call_info.id) {
-                    match client.hangup_call(&call_id).await {
+                // Parse the call ID back to CallId type
+                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    match client.hangup(&call_id).await {
                         Ok(_) => {
-                            // Stop audio for the call
-                            if let Some(audio_controls) = &self.audio_controls {
-                                if let Err(e) = audio_controls.stop_audio().await {
-                                    error!("Failed to stop audio for call {}: {}", call_id, e);
-                                }
-                                audio_controls.set_current_call(None).await;
-                            }
-                            
                             *self.current_call.write().await = None;
                             Ok(())
                         }
                         Err(e) => {
                             let error_msg = format!("Hangup failed: {}", e);
-                            info!("{}", error_msg);
+                            error!("{}", error_msg);
                             Err(e.into())
                         }
                     }
@@ -316,28 +263,19 @@ impl SipClientManager {
                 info!("Answering incoming call: {}", call_info.id);
                 
                 if let Some(client) = &self.client {
-                    // Parse the call ID back to UUID
-                    if let Ok(call_id) = uuid::Uuid::parse_str(&call_info.id) {
-                        match client.answer_call(&call_id).await {
+                    // Parse the call ID back to CallId type
+                    if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                        match client.answer(&call_id).await {
                             Ok(_) => {
                                 // Update call state to connected
                                 if let Some(call) = self.current_call.write().await.as_mut() {
                                     call.state = CallState::Connected;
                                 }
-                                
-                                // Start audio for the answered call
-                                if let Some(audio_controls) = &self.audio_controls {
-                                    audio_controls.set_current_call(Some(call_id.to_string())).await;
-                                    if let Err(e) = audio_controls.start_audio().await {
-                                        error!("Failed to start audio for answered call {}: {}", call_id, e);
-                                    }
-                                }
-                                
                                 Ok(())
                             }
                             Err(e) => {
                                 let error_msg = format!("Answer call failed: {}", e);
-                                info!("{}", error_msg);
+                                error!("{}", error_msg);
                                 Err(e.into())
                             }
                         }
@@ -371,106 +309,66 @@ impl SipClientManager {
         self.config = config;
     }
     
-    pub fn set_event_handler(&mut self, handler: Arc<DioxusEventHandler>) {
-        self.event_handler = Some(handler);
-    }
-    
-    // Audio control methods
-    
-    /// Get audio controls for the UI
-    pub fn get_audio_controls(&self) -> Option<Arc<AudioControls>> {
-        self.audio_controls.clone()
-    }
-    
     /// Toggle microphone mute for the current call
-    pub async fn toggle_microphone_mute(&self) -> Result<bool> {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.toggle_microphone_mute().await
+    pub async fn toggle_mute(&self) -> Result<bool> {
+        if let Some(call_info) = self.current_call.read().await.as_ref() {
+            if let Some(client) = &self.client {
+                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    let current_state = client.is_muted(&call_id).await?;
+                    client.set_mute(&call_id, !current_state).await?;
+                    Ok(!current_state)
+                } else {
+                    Ok(false)
+                }
+            } else {
+                Ok(false)
+            }
         } else {
             Ok(false)
-        }
-    }
-    
-    /// Toggle speaker mute for the current call
-    pub async fn toggle_speaker_mute(&self) -> Result<bool> {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.toggle_speaker_mute().await
-        } else {
-            Ok(false)
-        }
-    }
-    
-    /// Set input volume (0.0 to 1.0)
-    pub async fn set_input_volume(&self, volume: f32) -> Result<()> {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.set_input_volume(volume).await
-        } else {
-            Ok(())
-        }
-    }
-    
-    /// Set output volume (0.0 to 1.0)
-    pub async fn set_output_volume(&self, volume: f32) -> Result<()> {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.set_output_volume(volume).await
-        } else {
-            Ok(())
         }
     }
     
     /// Check if microphone is muted
-    pub async fn is_microphone_muted(&self) -> bool {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.is_microphone_muted().await
+    pub async fn is_muted(&self) -> bool {
+        if let Some(call_info) = self.current_call.read().await.as_ref() {
+            if let Some(client) = &self.client {
+                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    client.is_muted(&call_id).await.unwrap_or(false)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         } else {
             false
         }
     }
     
-    /// Check if speaker is muted
-    pub async fn is_speaker_muted(&self) -> bool {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.is_speaker_muted().await
+    /// List available audio devices
+    pub async fn list_audio_devices(&self, direction: AudioDirection) -> Result<Vec<(String, String)>> {
+        if let Some(client) = &self.client {
+            let devices = client.list_audio_devices(direction).await?;
+            Ok(devices.into_iter().map(|d| (d.id, d.name)).collect())
         } else {
-            false
+            Ok(vec![])
         }
     }
     
-    /// Check if audio is active
-    pub async fn is_audio_active(&self) -> bool {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.is_audio_active().await
-        } else {
-            false
+    /// Set audio device
+    pub async fn set_audio_device(&self, direction: AudioDirection, device_id: &str) -> Result<()> {
+        if let Some(client) = &self.client {
+            client.set_audio_device(direction, device_id).await?;
         }
-    }
-    
-    /// Get audio summary for display
-    pub async fn get_audio_summary(&self) -> Option<crate::audio::audio_controls::AudioSummary> {
-        if let Some(audio_controls) = &self.audio_controls {
-            Some(audio_controls.get_audio_summary().await)
-        } else {
-            None
-        }
-    }
-    
-    /// Enable/disable audio
-    pub async fn set_audio_enabled(&self, enabled: bool) -> Result<()> {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.set_audio_enabled(enabled).await
-        } else {
-            Ok(())
-        }
-    }
-    
-    /// Check if audio is enabled
-    pub async fn is_audio_enabled(&self) -> bool {
-        if let Some(audio_controls) = &self.audio_controls {
-            audio_controls.is_audio_enabled().await
-        } else {
-            false
-        }
+        Ok(())
     }
 }
 
- 
+impl Drop for SipClientManager {
+    fn drop(&mut self) {
+        // Cancel the event task if it exists
+        if let Some(task) = self.event_task.take() {
+            task.abort();
+        }
+    }
+}
