@@ -250,12 +250,14 @@ pub fn App() -> Element {
     // Answer incoming call handler
     let on_answer_call = {
         let sip_client = sip_client.clone();
-        let app_state = app_state.clone();
+        let mut app_state = app_state.clone();
         let error_message = error_message.clone();
         
         move |_| {
+            // Immediately return to call interface screen
+            app_state.set(AppState::CallInterface);
+            
             let sip_client = sip_client.clone();
-            let mut app_state = app_state.clone();
             let mut error_message = error_message.clone();
             
             spawn(async move {
@@ -272,8 +274,6 @@ pub fn App() -> Element {
                         error_message.set(Some(format!("Failed to answer call: {}", e)));
                     }
                 }
-                // Always return to call interface screen after making a choice
-                app_state.set(AppState::CallInterface);
             });
         }
     };
@@ -281,16 +281,16 @@ pub fn App() -> Element {
     // Reject incoming call handler
     let on_reject_call = {
         let sip_client = sip_client.clone();
-        let app_state = app_state.clone();
+        let mut app_state = app_state.clone();
         
         move |_| {
+            // Immediately return to call interface screen
+            app_state.set(AppState::CallInterface);
+            
             let sip_client = sip_client.clone();
-            let mut app_state = app_state.clone();
             
             spawn(async move {
                 info!("Rejecting incoming call");
-                
-                app_state.set(AppState::CallInterface);
                 
                 // Hangup to reject
                 let sip_guard = sip_client.read();
