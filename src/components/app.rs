@@ -3,7 +3,7 @@ use log::{error, info};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig};
+use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig, ConnectionMode};
 use crate::event_channel::EventChannel;
 use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen};
 use rvoip::sip_client::SipClientEvent;
@@ -28,6 +28,8 @@ pub fn App() -> Element {
     let password = use_signal(|| "".to_string());
     let server_uri = use_signal(|| "".to_string());
     let call_target = use_signal(|| "".to_string());
+    let selected_interface = use_signal(|| None::<String>);
+    let port = use_signal(|| "5070".to_string());
     
     // Create event channel
     let event_channel = use_signal(|| Arc::new(RwLock::new(EventChannel::new())));
@@ -94,6 +96,8 @@ pub fn App() -> Element {
         let username = username.clone();
         let password = password.clone();
         let server_uri = server_uri.clone();
+        let selected_interface = selected_interface.clone();
+        let port = port.clone();
         let app_state = app_state.clone();
         let error_message = error_message.clone();
         
@@ -103,19 +107,39 @@ pub fn App() -> Element {
             let username = username.read().clone();
             let password = password.read().clone();
             let server_uri = server_uri.read().clone();
+            let selected_interface = selected_interface.read().clone();
+            let port = port.read().clone();
             let mut app_state = app_state.clone();
             let mut error_message = error_message.clone();
             
             spawn(async move {
-                info!("Starting registration process...");
+                info!("Starting connection process...");
+                
+                // Determine connection mode based on URI content
+                let connection_mode = if server_uri.is_empty() {
+                    // Receiver mode - just listening
+                    ConnectionMode::Receiver
+                } else if server_uri.contains('@') {
+                    // P2P mode
+                    ConnectionMode::PeerToPeer {
+                        target_uri: server_uri.clone(),
+                    }
+                } else {
+                    // Server mode
+                    ConnectionMode::Server {
+                        server_uri: server_uri.clone(),
+                        username: username.clone(),
+                        password: password.clone(),
+                    }
+                };
                 
                 // Update configuration
+                let port_num = port.parse::<u16>().unwrap_or(5070);
                 let config = SipConfig {
-                    username: username.clone(),
-                    password: password.clone(),
-                    server_uri: server_uri.clone(),
-                    local_port: 5070,
-                    display_name: Some(username.clone()),
+                    display_name: username.clone(),
+                    connection_mode,
+                    local_port: port_num,
+                    local_ip: selected_interface.clone(),
                 };
                 
                 {
@@ -293,6 +317,8 @@ pub fn App() -> Element {
                 username: username.clone(),
                 password: password.clone(),
                 server_uri: server_uri.clone(),
+                selected_interface: selected_interface.clone(),
+                port: port.clone(),
                 registration_state: registration_state.clone(),
                 on_register: on_register,
                 on_skip: on_skip,

@@ -13,6 +13,9 @@ pub fn CallInterfaceScreen(
     on_hangup_call: EventHandler<()>,
     on_logout: EventHandler<()>
 ) -> Element {
+    // Determine connection mode based on server_uri
+    let is_p2p_mode = server_uri.contains('@');
+    let is_receiver_mode = server_uri.is_empty();
     // Timer to update call duration every second
     use_effect(move || {
         // Read the current call state - this makes the effect reactive to changes
@@ -75,11 +78,37 @@ pub fn CallInterfaceScreen(
                 div {
                     div {
                         style: "font-weight: 500; color: #1E293B; font-size: 0.875rem;",
-                        "Connected as: {username}"
+                        if is_receiver_mode {
+                            "Receiver Mode - {username}"
+                        } else if is_p2p_mode {
+                            "P2P Mode - {username}"
+                        } else {
+                            "Connected as: {username}"
+                        }
                     }
                     div {
                         style: "color: #64748B; font-size: 0.75rem; margin-top: 2px;",
-                        "{server_uri}"
+                        if is_receiver_mode {
+                            // Show the listening address
+                            {
+                                let sip_client_guard = sip_client.read();
+                                let client = sip_client_guard.clone();
+                                let mut address = use_signal(|| "".to_string());
+                                
+                                spawn(async move {
+                                    let guard = client.read().await;
+                                    if let Some(addr) = guard.get_listening_address() {
+                                        address.set(addr);
+                                    }
+                                });
+                                
+                                format!("Listening on: {}", address.read())
+                            }
+                        } else if is_p2p_mode {
+                            "Direct to: {server_uri}"
+                        } else {
+                            "Server: {server_uri}"
+                        }
                     }
                 }
                 
@@ -152,7 +181,11 @@ pub fn CallInterfaceScreen(
                             box-sizing: border-box;
                         ",
                         r#type: "text",
-                        placeholder: "sip:user@example.com",
+                        placeholder: if is_p2p_mode { 
+                            "Enter name (e.g., alice) or full URI" 
+                        } else { 
+                            "sip:user@example.com" 
+                        },
                         value: "{call_target}",
                         oninput: move |evt| call_target.set(evt.value())
                     }

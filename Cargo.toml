@@ -27,5 +27,8 @@ thiserror = "1.0"
 # Audio and media handling
 cpal = "0.15"
 
+# Network utilities
+local-ip-address = "0.6"
+
 [dev-dependencies]
 tokio-test = "0.4" 

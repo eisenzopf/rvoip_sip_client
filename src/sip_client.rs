@@ -8,22 +8,37 @@ use tokio::sync::{RwLock, mpsc};
 use rvoip::sip_client::{SipClient, SipClientBuilder, SipClientEvent, AudioDirection, CallId, CallState as SipCallState};
 
 #[derive(Debug, Clone)]
+pub enum ConnectionMode {
+    Server {
+        server_uri: String,
+        username: String,
+        password: String,
+    },
+    PeerToPeer {
+        target_uri: String,
+    },
+    Receiver, // Just listening for incoming calls
+}
+
+#[derive(Debug, Clone)]
 pub struct SipConfig {
-    pub username: String,
-    pub password: String,
-    pub server_uri: String,
+    pub display_name: String,  // User's display name
+    pub connection_mode: ConnectionMode,
     pub local_port: u16,
-    pub display_name: Option<String>,
+    pub local_ip: Option<String>,  // Optional local IP to bind to
 }
 
 impl Default for SipConfig {
     fn default() -> Self {
         Self {
-            username: "user".to_string(),
-            password: "password".to_string(),
-            server_uri: "sip:127.0.0.1:5060".to_string(),
+            display_name: "User".to_string(),
+            connection_mode: ConnectionMode::Server {
+                server_uri: "sip:127.0.0.1:5060".to_string(),
+                username: "user".to_string(),
+                password: "password".to_string(),
+            },
             local_port: 5070,
-            display_name: None,
+            local_ip: None,
         }
     }
 }
@@ -88,26 +103,68 @@ impl SipClientManager {
     pub async fn initialize(&mut self) -> Result<()> {
         info!("Initializing SIP client with config: {:?}", self.config);
         
-        // Parse server URI to extract host
-        let server_host = if self.config.server_uri.starts_with("sip:") {
-            self.config.server_uri.strip_prefix("sip:").unwrap_or(&self.config.server_uri)
-        } else {
-            &self.config.server_uri
+        let client = match &self.config.connection_mode {
+            ConnectionMode::Server { server_uri, username, password } => {
+                // Server mode: extract host and build identity
+                let server_host = if server_uri.starts_with("sip:") {
+                    server_uri.strip_prefix("sip:").unwrap_or(server_uri)
+                } else {
+                    server_uri
+                };
+                
+                let sip_identity = format!("sip:{}@{}", username, server_host);
+                
+                // Create client with registration
+                let local_addr = if let Some(ip) = &self.config.local_ip {
+                    format!("{}:{}", ip, self.config.local_port)
+                } else {
+                    format!("0.0.0.0:{}", self.config.local_port)
+                };
+                
+                SipClientBuilder::new()
+                    .sip_identity(sip_identity.clone())
+                    .local_address(local_addr.parse()?)
+                    .register(|reg| {
+                        reg.credentials(username.clone(), password.clone())
+                           .expires(3600)
+                    })
+                    .build()
+                    .await?
+            }
+            ConnectionMode::PeerToPeer { .. } | ConnectionMode::Receiver => {
+                // P2P mode or Receiver mode: simple identity without registration
+                // Use configured IP or detect one
+                let identity_ip = if let Some(ip) = &self.config.local_ip {
+                    ip.clone()
+                } else if matches!(self.config.connection_mode, ConnectionMode::Receiver) {
+                    // Try to get actual local IP for receiver mode
+                    local_ip_address::local_ip()
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_else(|_| "127.0.0.1".to_string())
+                } else {
+                    "127.0.0.1".to_string()
+                };
+                
+                let sip_identity = format!("sip:{}@{}:{}", 
+                    self.config.display_name, 
+                    identity_ip,
+                    self.config.local_port
+                );
+                
+                // Create client without registration
+                let local_addr = if let Some(ip) = &self.config.local_ip {
+                    format!("{}:{}", ip, self.config.local_port)
+                } else {
+                    format!("0.0.0.0:{}", self.config.local_port)
+                };
+                
+                SipClientBuilder::new()
+                    .sip_identity(sip_identity.clone())
+                    .local_address(local_addr.parse()?)
+                    .build()
+                    .await?
+            }
         };
-        
-        // Build SIP identity
-        let sip_identity = format!("sip:{}@{}", self.config.username, server_host);
-        
-        // Create SIP client using the builder
-        let client = SipClientBuilder::new()
-            .sip_identity(sip_identity.clone())
-            .local_address(format!("127.0.0.1:{}", self.config.local_port).parse()?)
-            .register(|reg| {
-                reg.credentials(self.config.username.clone(), self.config.password.clone())
-                   .expires(3600)
-            })
-            .build()
-            .await?;
         
         // Start the client
         client.start().await?;
@@ -115,7 +172,13 @@ impl SipClientManager {
         // Store the client
         self.client = Some(client);
         
-        info!("SIP client initialized successfully");
+        info!("SIP client initialized successfully in {:?} mode", 
+            match &self.config.connection_mode {
+                ConnectionMode::Server { .. } => "Server",
+                ConnectionMode::PeerToPeer { .. } => "P2P",
+                ConnectionMode::Receiver => "Receiver",
+            }
+        );
         Ok(())
     }
     
@@ -198,11 +261,51 @@ impl SipClientManager {
     }
 
     pub async fn make_call(&mut self, target_uri: &str) -> Result<String> {
-        info!("Making call to: {}", target_uri);
+        // Format the target URI based on connection mode
+        let formatted_uri = match &self.config.connection_mode {
+            ConnectionMode::PeerToPeer { target_uri: connected_peer } => {
+                // In P2P mode, ensure the target has proper SIP URI format
+                if target_uri.contains('@') {
+                    // Already a full SIP URI
+                    target_uri.to_string()
+                } else if target_uri.starts_with("sip:") {
+                    // Has sip: prefix but might need formatting
+                    target_uri.to_string()
+                } else {
+                    // Just a name/extension, format it with the connected peer's domain
+                    // Extract domain from connected peer (e.g., "alice@192.168.1.100" -> "192.168.1.100")
+                    if let Some(at_pos) = connected_peer.find('@') {
+                        let domain = &connected_peer[at_pos + 1..];
+                        format!("sip:{}@{}", target_uri, domain)
+                    } else {
+                        // Fallback to direct URI
+                        format!("sip:{}", target_uri)
+                    }
+                }
+            }
+            ConnectionMode::Server { .. } => {
+                // In server mode, use the target as-is (server handles routing)
+                if target_uri.starts_with("sip:") {
+                    target_uri.to_string()
+                } else {
+                    format!("sip:{}", target_uri)
+                }
+            }
+            ConnectionMode::Receiver => {
+                // In receiver mode, format with SIP URI
+                if target_uri.starts_with("sip:") {
+                    target_uri.to_string()
+                } else {
+                    format!("sip:{}", target_uri)
+                }
+            }
+        };
+        
+        info!("Making call to: {} (formatted as: {})", target_uri, formatted_uri);
 
         if let Some(client) = &self.client {
             // Make the call using the new API
-            match client.call(target_uri).await {
+            match client.call(&formatted_uri).await {
                 Ok(call) => {
                     let call_info = CallInfo {
                         id: call.id.to_string(),
@@ -303,6 +406,27 @@ impl SipClientManager {
 
     pub fn get_config(&self) -> &SipConfig {
         &self.config
+    }
+    
+    /// Get the listening address for receiver mode
+    pub fn get_listening_address(&self) -> Option<String> {
+        match &self.config.connection_mode {
+            ConnectionMode::Receiver => {
+                let local_ip = if let Some(ip) = &self.config.local_ip {
+                    ip.clone()
+                } else {
+                    local_ip_address::local_ip()
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_else(|_| "127.0.0.1".to_string())
+                };
+                Some(format!("{}@{}:{}", 
+                    self.config.display_name, 
+                    local_ip, 
+                    self.config.local_port
+                ))
+            }
+            _ => None,
+        }
     }
 
     pub fn update_config(&mut self, config: SipConfig) {
