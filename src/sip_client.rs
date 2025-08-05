@@ -226,6 +226,18 @@ impl SipClientManager {
                                 }
                             }
                         }
+                        SipClientEvent::CallConnected { call_id, codec, .. } => {
+                            info!("Call connected event received: {:?} with codec: {}", call_id, codec);
+                            if let Some(info) = current_call.write().await.as_mut() {
+                                if info.id == call_id.to_string() {
+                                    info!("Updating call state to Connected via CallConnected event");
+                                    info.state = CallState::Connected;
+                                    if info.connected_at.is_none() {
+                                        info.connected_at = Some(chrono::Utc::now());
+                                    }
+                                }
+                            }
+                        }
                         SipClientEvent::CallEnded { call } => {
                             let mut current = current_call.write().await;
                             if let Some(info) = current.as_ref() {
