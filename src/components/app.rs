@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig, ConnectionMode};
 use crate::event_channel::EventChannel;
-use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen};
+use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen, TitleBanner};
 use rvoip::sip_client::SipClientEvent;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,7 +28,15 @@ pub fn App() -> Element {
     let password = use_signal(|| "".to_string());
     let server_uri = use_signal(|| "".to_string());
     let call_target = use_signal(|| "".to_string());
-    let selected_interface = use_signal(|| None::<String>);
+    let selected_interface = use_signal(|| {
+        // Initialize with the first available interface
+        let interfaces = crate::network_utils::get_available_interfaces();
+        if !interfaces.is_empty() {
+            Some(interfaces[0].ip.to_string())
+        } else {
+            None
+        }
+    });
     let port = use_signal(|| "5070".to_string());
     
     // Create event channel
@@ -300,7 +308,7 @@ pub fn App() -> Element {
         }
     };
     
-    // Skip registration handler
+    // Skip registration handler (not used anymore, but kept for compatibility)
     let on_skip = {
         let mut app_state = app_state.clone();
         
@@ -311,37 +319,54 @@ pub fn App() -> Element {
     
     // Render based on current app state
     let current_state = app_state.read().clone();
-    match current_state {
-        AppState::Registration => rsx! {
-            RegistrationScreen {
-                username: username.clone(),
-                password: password.clone(),
-                server_uri: server_uri.clone(),
-                selected_interface: selected_interface.clone(),
-                port: port.clone(),
-                registration_state: registration_state.clone(),
-                on_register: on_register,
-                on_skip: on_skip,
+    
+    rsx! {
+        div {
+            style: "
+                font-family: Arial, sans-serif;
+                height: 100vh;
+                background-color: #F9FAFB;
+                margin: 0;
+                padding: 0;
+            ",
+            TitleBanner {}
+            
+            div {
+                style: "padding: 0 20px;",
+                match current_state {
+                    AppState::Registration => rsx! {
+                        RegistrationScreen {
+                            username: username.clone(),
+                            password: password.clone(),
+                            server_uri: server_uri.clone(),
+                            selected_interface: selected_interface.clone(),
+                            port: port.clone(),
+                            registration_state: registration_state.clone(),
+                            on_register: on_register,
+                            on_skip: on_skip,
+                        }
+                    },
+                    AppState::CallInterface => rsx! {
+                        CallInterfaceScreen {
+                            username: username.read().clone(),
+                            server_uri: server_uri.read().clone(),
+                            sip_client: sip_client.clone(),
+                            call_target: call_target.clone(),
+                            current_call: current_call.clone(),
+                            on_make_call: on_make_call,
+                            on_hangup_call: on_hangup,
+                            on_logout: on_logout,
+                        }
+                    },
+                    AppState::IncomingCall { caller_id } => rsx! {
+                        IncomingCallScreen {
+                            caller_id: caller_id,
+                            on_answer: on_answer_call,
+                            on_ignore: on_reject_call,
+                        }
+                    },
+                }
             }
-        },
-        AppState::CallInterface => rsx! {
-            CallInterfaceScreen {
-                username: username.read().clone(),
-                server_uri: server_uri.read().clone(),
-                sip_client: sip_client.clone(),
-                call_target: call_target.clone(),
-                current_call: current_call.clone(),
-                on_make_call: on_make_call,
-                on_hangup_call: on_hangup,
-                on_logout: on_logout,
-            }
-        },
-        AppState::IncomingCall { caller_id } => rsx! {
-            IncomingCallScreen {
-                caller_id: caller_id,
-                on_answer: on_answer_call,
-                on_ignore: on_reject_call,
-            }
-        },
+        }
     }
 }

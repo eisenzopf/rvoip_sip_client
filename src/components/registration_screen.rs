@@ -18,38 +18,17 @@ pub fn RegistrationScreen(
     
     // Smart detection: if the URI contains @, it's P2P mode
     let is_p2p_mode = server_uri_value.contains('@');
-    let is_receiver_mode = server_uri_value.is_empty();
     
     // Get available network interfaces
-    let interfaces = use_signal(|| get_available_interfaces());
-    
-    // Set default interface if none selected
-    use_effect({
-        let mut selected_interface = selected_interface.clone();
-        let interfaces = interfaces.clone();
-        move || {
-            if selected_interface.read().is_none() {
-                let ifaces = interfaces.read();
-                if !ifaces.is_empty() {
-                    selected_interface.set(Some(ifaces[0].ip.to_string()));
-                }
-            }
-        }
-    });
+    let interfaces = get_available_interfaces();
     
     let status_text = match &*binding {
         CallState::Idle => {
-            if server_uri_value.is_empty() {
-                "Ready to receive incoming calls"
-            } else if is_p2p_mode {
-                "Enter peer address to connect directly"
-            } else {
-                "Enter server details to connect"
-            }
+            "Ready to configure"
         },
         CallState::Registering => {
             if server_uri_value.is_empty() {
-                "Starting receiver mode..."
+                "Starting listener..."
             } else if is_p2p_mode {
                 "Connecting to peer..."
             } else {
@@ -86,64 +65,30 @@ pub fn RegistrationScreen(
                 border: 1px solid #E2E8F0;
             ",
             
-            div {
-                style: "
-                    margin-bottom: 32px;
-                    padding-bottom: 24px;
-                    border-bottom: 1px solid #F1F5F9;
-                ",
-                
-                h2 {
-                    style: "
-                        font-size: 1.5rem;
-                        font-weight: 500;
-                        color: #1E293B;
-                        margin: 0 0 8px 0;
-                    ",
-                    "SIP Connection"
-                }
-                
-                p {
-                    style: "
-                        font-size: 0.875rem;
-                        color: #64748B;
-                        margin: 0 0 8px 0;
-                    ",
-                    "Connect to a SIP server or directly to another peer"
-                }
-                
-                p {
-                    style: "
-                        font-size: 0.75rem;
-                        color: #9CA3AF;
-                        margin: 0;
-                        font-style: italic;
-                    ",
-                    "Server: enter domain (e.g., sip.example.com) | P2P: enter user@address (e.g., alice@192.168.1.100)"
-                }
-            }
 
-            // Status indicator
-            div {
-                style: "margin-bottom: 24px;",
-                
+            // Status indicator - only show when not idle
+            if !matches!(&*binding, CallState::Idle) {
                 div {
-                    style: format!("
-                        display: inline-flex;
-                        align-items: center;
-                        padding: 8px 12px;
-                        background: {};
-                        border-radius: 16px;
-                        border: 1px solid {}30;
-                    ", status_bg, status_color),
+                    style: "margin-bottom: 24px;",
                     
-                    span {
+                    div {
                         style: format!("
-                            font-weight: 500;
-                            color: {};
-                            font-size: 0.875rem;
-                        ", status_color),
-                        "{status_text}"
+                            display: inline-flex;
+                            align-items: center;
+                            padding: 8px 12px;
+                            background: {};
+                            border-radius: 16px;
+                            border: 1px solid {}30;
+                        ", status_bg, status_color),
+                        
+                        span {
+                            style: format!("
+                                font-weight: 500;
+                                color: {};
+                                font-size: 0.875rem;
+                            ", status_color),
+                            "{status_text}"
+                        }
                     }
                 }
             }
@@ -152,7 +97,7 @@ pub fn RegistrationScreen(
             div {
                 style: "display: flex; flex-direction: column; gap: 20px; margin-bottom: 32px;",
                 
-                // Your Name field
+                // Name field (required)
                 div {
                     label {
                         style: "
@@ -162,7 +107,11 @@ pub fn RegistrationScreen(
                             color: #374151;
                             margin-bottom: 8px;
                         ",
-                        "Your Name"
+                        span { "Name" }
+                        span {
+                            style: "color: #DC2626; margin-left: 4px;",
+                            "*"
+                        }
                     }
                     input {
                         style: "
@@ -179,11 +128,12 @@ pub fn RegistrationScreen(
                         placeholder: "Alice",
                         value: "{username}",
                         oninput: move |evt| username.set(evt.value()),
-                        disabled: is_loading
+                        disabled: is_loading,
+                        required: true
                     }
                 }
                 
-                // Connect To field
+                // SIP Server field (optional)
                 div {
                     label {
                         style: "
@@ -193,7 +143,7 @@ pub fn RegistrationScreen(
                             color: #374151;
                             margin-bottom: 8px;
                         ",
-                        "Connect To"
+                        "SIP Server (optional)"
                     }
                     input {
                         style: "
@@ -207,7 +157,7 @@ pub fn RegistrationScreen(
                             box-sizing: border-box;
                         ",
                         r#type: "text",
-                        placeholder: "sip.example.com or alice@192.168.1.100",
+                        placeholder: "sip.example.com",
                         value: "{server_uri}",
                         oninput: move |evt| server_uri.set(evt.value()),
                         disabled: is_loading
@@ -219,11 +169,11 @@ pub fn RegistrationScreen(
                             margin: 4px 0 0 0;
                         ",
                         if server_uri_value.is_empty() {
-                            "Receiver Mode: Will listen for incoming calls"
+                            "Listen for incoming calls only"
                         } else if is_p2p_mode {
-                            "P2P Mode: Connecting directly to peer"
+                            "Direct peer-to-peer connection"
                         } else {
-                            "Server Mode: Will connect to SIP server"
+                            "Connect to SIP server"
                         }
                     }
                 }
@@ -261,9 +211,13 @@ pub fn RegistrationScreen(
                     }
                 }
                 
-                // Network interface dropdown - show for receiver mode or when advanced settings visible
-                if is_receiver_mode || is_p2p_mode {
+                // Network interface and Port row
+                div {
+                    style: "display: flex; gap: 12px;",
+                    
+                    // Network interface dropdown
                     div {
+                        style: "flex: 2;",
                         label {
                             style: "
                                 display: block;
@@ -291,16 +245,11 @@ pub fn RegistrationScreen(
                                 selected_interface.set(Some(evt.value()));
                             },
                             disabled: is_loading,
-                            {
-                                let ifaces = interfaces.read();
-                                rsx! {
-                                    for iface in ifaces.iter() {
-                                        option {
-                                            value: "{iface.ip}",
-                                            selected: selected_interface.read().as_ref() == Some(&iface.ip.to_string()),
-                                            "{iface.display_name}"
-                                        }
-                                    }
+                            for iface in interfaces.iter() {
+                                option {
+                                    value: "{iface.ip}",
+                                    selected: selected_interface.read().as_ref() == Some(&iface.ip.to_string()),
+                                    "{iface.display_name}"
                                 }
                             }
                         }
@@ -308,6 +257,7 @@ pub fn RegistrationScreen(
                     
                     // Port field
                     div {
+                        style: "flex: 1;",
                         label {
                             style: "
                                 display: block;
@@ -337,60 +287,28 @@ pub fn RegistrationScreen(
                             min: "1024",
                             max: "65535"
                         }
-                        p {
-                            style: "
-                                font-size: 0.75rem;
-                                color: #6B7280;
-                                margin: 4px 0 0 0;
-                            ",
-                            "Port number between 1024-65535"
-                        }
                     }
                 }
             }
             
-            div {
-                style: "display: flex; gap: 12px;",
-                
-                button {
-                    style: format!("
-                        flex: 1;
-                        padding: 14px 16px;
-                        background: {};
-                        color: white;
-                        border: none;
-                        border-radius: 6px;
-                        font-size: 0.875rem;
-                        font-weight: 500;
-                        cursor: {};
-                    ", 
-                        if is_loading { "#9CA3AF" } else { "#1E293B" },
-                        if is_loading { "not-allowed" } else { "pointer" }
-                    ),
-                    onclick: move |_| if !is_loading { on_register.call(()) },
-                    disabled: is_loading,
-                    if is_loading { "Connecting..." } else { "Connect" }
-                }
-                
-                button {
-                    style: format!("
-                        flex: 1;
-                        padding: 14px 16px;
-                        background: {};
-                        color: #374151;
-                        border: 1px solid #D1D5DB;
-                        border-radius: 6px;
-                        font-size: 0.875rem;
-                        font-weight: 500;
-                        cursor: {};
-                    ", 
-                        if is_loading { "#F9FAFB" } else { "white" },
-                        if is_loading { "not-allowed" } else { "pointer" }
-                    ),
-                    onclick: move |_| if !is_loading { on_skip.call(()) },
-                    disabled: is_loading,
-                    "Skip"
-                }
+            button {
+                style: format!("
+                    width: 100%;
+                    padding: 14px 16px;
+                    background: {};
+                    color: white;
+                    border: none;
+                    border-radius: 6px;
+                    font-size: 0.875rem;
+                    font-weight: 500;
+                    cursor: {};
+                ", 
+                    if is_loading { "#9CA3AF" } else { "#1E293B" },
+                    if is_loading { "not-allowed" } else { "pointer" }
+                ),
+                onclick: move |_| if !is_loading && !username.read().is_empty() { on_register.call(()) },
+                disabled: is_loading || username.read().is_empty(),
+                if is_loading { "Connecting..." } else { "Next" }
             }
         }
     }
