@@ -161,7 +161,7 @@ pub fn CallControls(
                         if is_on_hook {
                             "w-16 h-16 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center relative"
                         } else {
-                            "w-16 h-16 bg-orange-600 hover:bg-orange-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center relative"
+                            "w-16 h-16 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center relative"
                         }
                     } else {
                         "w-16 h-16 bg-gray-100 text-gray-400 rounded-lg cursor-not-allowed opacity-50 flex items-center justify-center"
@@ -181,7 +181,7 @@ pub fn CallControls(
                             div {
                                 class: "absolute -top-1 -right-1 w-3 h-3 bg-white rounded-full",
                                 div {
-                                    class: "absolute inset-0.5 bg-orange-600 rounded-full"
+                                    class: "absolute inset-0.5 bg-red-600 rounded-full"
                                 }
                             }
                         }

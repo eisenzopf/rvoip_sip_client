@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
 use crate::sip_client::{CallInfo, SipClientManager, CallState};
-use crate::components::{UserInfoBar, CallStatus, CallControls};
+use crate::components::{UserInfoBar, CallStatus, CallControls, HookStatus};
 use crate::components::call_control_state::CallControlState;
 
 #[component]
@@ -25,7 +25,7 @@ pub fn CallInterfaceScreen(
     // Track hook state
     let is_on_hook = use_signal(|| true);
     
-    // Fetch the actual connection mode, listening address, and hook state on mount
+    // Fetch the actual connection mode, listening address, and hook state on mount (only once)
     use_effect({
         let sip_client = sip_client.clone();
         let mut listening_address = listening_address.clone();
@@ -39,7 +39,7 @@ pub fn CallInterfaceScreen(
                 // Check if we're actually in receiver mode
                 is_receiver_mode.set(guard.is_receiver_mode());
                 
-                // Get current hook state
+                // Get current hook state only once on mount
                 is_on_hook.set(guard.is_on_hook().await);
                 
                 // Get listening address if in receiver mode
@@ -97,20 +97,32 @@ pub fn CallInterfaceScreen(
     // Get the control state to determine desired hook state
     let control_state = CallControlState::from_call_state(call_state.as_ref(), is_muted);
     
-    // Automatically update hook state based on call state
+    // Automatically set hook state to off during active calls
     use_effect({
         let sip_client = sip_client.clone();
-        let control_state = control_state.clone();
         let mut is_on_hook = is_on_hook.clone();
+        let call_state = call_state.clone();
         move || {
-            if *is_on_hook.read() != control_state.hook_should_be_on {
-                spawn(async move {
-                    let client = sip_client.read().clone();
-                    let guard = client.read().await;
-                    if let Ok(_) = guard.set_hook_state(control_state.hook_should_be_on).await {
-                        is_on_hook.set(control_state.hook_should_be_on);
+            // Force off-hook during active call states
+            match call_state {
+                Some(CallState::Calling) | 
+                Some(CallState::Ringing) | 
+                Some(CallState::Connected) | 
+                Some(CallState::OnHold) | 
+                Some(CallState::Transferring) => {
+                    if *is_on_hook.read() {
+                        spawn(async move {
+                            let client = sip_client.read().clone();
+                            let guard = client.read().await;
+                            if let Ok(_) = guard.set_hook_state(false).await {
+                                is_on_hook.set(false);
+                            }
+                        });
                     }
-                });
+                }
+                _ => {
+                    // Do nothing - let user control hook state when idle
+                }
             }
         }
     });
@@ -184,6 +196,7 @@ pub fn CallInterfaceScreen(
                         let client = sip_client.read().clone();
                         let guard = client.read().await;
                         if let Ok(new_state) = guard.toggle_hook().await {
+                            log::info!("Hook toggled to: {}", if new_state { "on hook" } else { "off hook" });
                             is_on_hook.set(new_state);
                         }
                     });
@@ -191,46 +204,11 @@ pub fn CallInterfaceScreen(
                 on_end_call: move |_| on_hangup_call.call(())
             }
             
-            // Receiver mode status at the bottom
-            if *is_receiver_mode.read() || *is_on_hook.read() {
-                div {
-                    class: "bg-gray-50 rounded-xl px-6 py-4 border border-gray-200",
-                    div {
-                        class: "flex items-center justify-between",
-                        div {
-                            class: "flex items-center gap-3",
-                            if *is_on_hook.read() {
-                                span {
-                                    class: "inline-flex items-center gap-2",
-                                    span { 
-                                        class: "w-2 h-2 bg-green-500 rounded-full animate-pulse",
-                                    }
-                                    span {
-                                        class: "text-sm font-medium text-gray-700",
-                                        "Ready to receive calls"
-                                    }
-                                }
-                            } else {
-                                span {
-                                    class: "inline-flex items-center gap-2",
-                                    span { 
-                                        class: "w-2 h-2 bg-gray-400 rounded-full",
-                                    }
-                                    span {
-                                        class: "text-sm font-medium text-gray-600",
-                                        "Not receiving calls"
-                                    }
-                                }
-                            }
-                        }
-                        if *is_receiver_mode.read() {
-                            div {
-                                class: "text-sm text-gray-600",
-                                "Listening on: {listening_address.read()}"
-                            }
-                        }
-                    }
-                }
+            // Hook status at the bottom
+            HookStatus {
+                is_on_hook: *is_on_hook.read(),
+                is_receiver_mode: *is_receiver_mode.read(),
+                listening_address: listening_address.read().clone(),
             }
         }
     }

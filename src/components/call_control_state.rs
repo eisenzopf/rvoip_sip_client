@@ -45,7 +45,7 @@ impl CallControlState {
                 end_call_label: "End Call",
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: true,
-                hook_should_be_on: true, // Ready to receive calls when idle
+                hook_should_be_on: true, // User can control this when idle
                 hook_style: ButtonStyle::Normal,
             },
             
