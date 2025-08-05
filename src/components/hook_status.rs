@@ -15,7 +15,7 @@ pub fn HookStatus(
                     class: "flex items-center gap-3",
                     span {
                         class: "inline-flex items-center gap-2",
-                        span { 
+                        div { 
                             class: if is_on_hook {
                                 "w-2 h-2 bg-green-500 rounded-full animate-pulse"
                             } else {
