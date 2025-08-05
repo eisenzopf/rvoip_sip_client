@@ -254,6 +254,22 @@ impl SipClientManager {
                                 }
                             }
                         }
+                        SipClientEvent::CallOnHold { call } => {
+                            info!("Call put on hold: {:?}", call.id);
+                            if let Some(info) = current_call.write().await.as_mut() {
+                                if info.id == call.id.to_string() {
+                                    info.state = CallState::OnHold;
+                                }
+                            }
+                        }
+                        SipClientEvent::CallResumed { call } => {
+                            info!("Call resumed: {:?}", call.id);
+                            if let Some(info) = current_call.write().await.as_mut() {
+                                if info.id == call.id.to_string() {
+                                    info.state = CallState::Connected;
+                                }
+                            }
+                        }
                         SipClientEvent::RegistrationStatusChanged { status, .. } => {
                             let state = match status.as_str() {
                                 "pending" => CallState::Registering,
