@@ -514,6 +514,9 @@
   .h-40 {
     height: calc(var(--spacing) * 40);
   }
+  .h-\[46px\] {
+    height: 46px;
+  }
   .h-full {
     height: 100%;
   }

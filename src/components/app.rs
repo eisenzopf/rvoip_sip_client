@@ -5,7 +5,7 @@ use tokio::sync::RwLock;
 
 use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig, ConnectionMode};
 use crate::event_channel::EventChannel;
-use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen, TitleBanner};
+use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen};
 use rvoip::sip_client::SipClientEvent;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -37,7 +37,7 @@ pub fn App() -> Element {
             None
         }
     });
-    let port = use_signal(|| "5070".to_string());
+    let port = use_signal(|| "5060".to_string());
     
     // Create event channel
     let event_channel = use_signal(|| Arc::new(RwLock::new(EventChannel::new())));
@@ -142,7 +142,7 @@ pub fn App() -> Element {
                 };
                 
                 // Update configuration
-                let port_num = port.parse::<u16>().unwrap_or(5070);
+                let port_num = port.parse::<u16>().unwrap_or(5060);
                 let config = SipConfig {
                     display_name: username.clone(),
                     connection_mode,
@@ -328,10 +328,9 @@ pub fn App() -> Element {
         
         div {
             class: "font-sans h-screen bg-gray-50 m-0 p-0",
-            TitleBanner {}
             
             div {
-                class: "px-5",
+                class: "px-5 pt-6",
                 match current_state {
                     AppState::Registration => rsx! {
                         RegistrationScreen {

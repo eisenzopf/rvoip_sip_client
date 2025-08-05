@@ -37,7 +37,7 @@ impl Default for SipConfig {
                 username: "user".to_string(),
                 password: "password".to_string(),
             },
-            local_port: 5070,
+            local_port: 5060,
             local_ip: None,
         }
     }

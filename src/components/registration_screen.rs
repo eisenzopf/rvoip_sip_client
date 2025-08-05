@@ -165,7 +165,7 @@ pub fn RegistrationScreen(
                             "Network Interface"
                         }
                         select {
-                            class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
+                            class: "w-full h-[46px] px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                             value: selected_interface.read().as_deref().unwrap_or(""),
                             oninput: move |evt| {
                                 selected_interface.set(Some(evt.value()));
@@ -189,9 +189,9 @@ pub fn RegistrationScreen(
                             "Port"
                         }
                         input {
-                            class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
+                            class: "w-full h-[46px] px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                             r#type: "number",
-                            placeholder: "5070",
+                            placeholder: "5060",
                             value: "{port}",
                             oninput: move |evt| port.set(evt.value()),
                             disabled: is_loading,
