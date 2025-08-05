@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
 use crate::sip_client::{CallInfo, SipClientManager, CallState};
-use crate::components::{UserInfoBar, CallStatus, MakeCallForm};
+use crate::components::{UserInfoBar, CallStatus, MakeCallForm, ReceiverStatus};
 
 #[component]
 pub fn CallInterfaceScreen(
@@ -128,6 +128,10 @@ pub fn CallInterfaceScreen(
                 }
             }
             
+            // Status messages for receiver mode when no active call
+            if is_receiver_mode && !has_active_call {
+                ReceiverStatus {}
+            }
         }
     }
 }

@@ -43,7 +43,7 @@ impl Default for SipConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CallState {
     Idle,
     Registering,
@@ -69,7 +69,7 @@ impl From<SipCallState> for CallState {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CallInfo {
     pub id: String,
     pub remote_uri: String,
