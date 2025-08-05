@@ -37,9 +37,9 @@ pub fn UserInfoBar(
             }
             
             button {
-                class: "px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs font-medium transition-colors",
+                class: "px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-md text-xs font-medium transition-colors",
                 onclick: move |_| on_logout.call(()),
-                "Disconnect"
+                "Logout"
             }
         }
     }

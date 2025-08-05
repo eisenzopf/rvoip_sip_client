@@ -89,6 +89,7 @@ pub struct SipClientManager {
     current_call: Arc<RwLock<Option<CallInfo>>>,
     event_sender: Option<mpsc::UnboundedSender<SipClientEvent>>,
     event_task: Option<tokio::task::JoinHandle<()>>,
+    is_on_hook: Arc<RwLock<bool>>, // true = on hook (can receive calls), false = off hook
 }
 
 impl SipClientManager {
@@ -100,6 +101,7 @@ impl SipClientManager {
             current_call: Arc::new(RwLock::new(None)),
             event_sender: None,
             event_task: None,
+            is_on_hook: Arc::new(RwLock::new(true)), // Default to on hook (can receive calls)
         }
     }
 
@@ -196,6 +198,8 @@ impl SipClientManager {
             let current_call = self.current_call.clone();
             let registration_state = self.registration_state.clone();
             let event_sender = self.event_sender.clone();
+            let is_on_hook = self.is_on_hook.clone();
+            let client_ref = self.client.clone();
             
             let task = tokio::spawn(async move {
                 while let Some(event) = events.next().await {
@@ -210,16 +214,25 @@ impl SipClientManager {
                     // Update internal state based on events
                     match &event {
                         SipClientEvent::IncomingCall { call, from, .. } => {
-                            let call_info = CallInfo {
-                                id: call.id.to_string(),
-                                remote_uri: from.clone(),
-                                state: CallState::Ringing,
-                                duration: None,
-                                is_incoming: true,
-                                connected_at: None,
-                                is_muted: Some(false),
-                            };
-                            *current_call.write().await = Some(call_info);
+                            // Check if we're on hook (able to receive calls)
+                            if *is_on_hook.read().await {
+                                let call_info = CallInfo {
+                                    id: call.id.to_string(),
+                                    remote_uri: from.clone(),
+                                    state: CallState::Ringing,
+                                    duration: None,
+                                    is_incoming: true,
+                                    connected_at: None,
+                                    is_muted: Some(false),
+                                };
+                                *current_call.write().await = Some(call_info);
+                            } else {
+                                // We're off hook, reject the incoming call
+                                info!("Rejecting incoming call - phone is off hook");
+                                if let Some(client) = &client_ref {
+                                    let _ = client.reject(&call.id).await;
+                                }
+                            }
                         }
                         SipClientEvent::CallStateChanged { call, new_state, .. } => {
                             info!("Call state changed: {:?} -> {:?}", call.id, new_state);
@@ -449,6 +462,34 @@ impl SipClientManager {
         }
     }
 
+    pub fn is_receiver_mode(&self) -> bool {
+        matches!(self.config.connection_mode, ConnectionMode::Receiver)
+    }
+    
+    pub async fn is_on_hook(&self) -> bool {
+        *self.is_on_hook.read().await
+    }
+    
+    pub async fn set_hook_state(&self, on_hook: bool) -> Result<()> {
+        *self.is_on_hook.write().await = on_hook;
+        info!("Hook state changed to: {} ({})", 
+            if on_hook { "on hook" } else { "off hook" },
+            if on_hook { "can receive calls" } else { "cannot receive calls" }
+        );
+        Ok(())
+    }
+    
+    pub async fn toggle_hook(&self) -> Result<bool> {
+        let mut hook_state = self.is_on_hook.write().await;
+        *hook_state = !*hook_state;
+        let new_state = *hook_state;
+        info!("Hook state toggled to: {} ({})", 
+            if new_state { "on hook" } else { "off hook" },
+            if new_state { "can receive calls" } else { "cannot receive calls" }
+        );
+        Ok(new_state)
+    }
+    
     pub fn update_config(&mut self, config: SipConfig) {
         self.config = config;
     }

@@ -7,8 +7,6 @@ pub mod call_status;
 pub mod make_call_form;
 pub mod call_controls;
 pub mod call_control_state;
-pub mod call_make_input;
-pub mod call_control_buttons;
 
 pub use app::App;
 pub use registration_screen::RegistrationScreen;

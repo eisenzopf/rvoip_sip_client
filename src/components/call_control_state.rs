@@ -23,6 +23,8 @@ pub struct CallControlState {
     pub end_call_visible: bool,
     pub end_call_label: &'static str,
     pub end_call_style: ButtonStyle,
+    pub hook_enabled: bool,
+    pub hook_should_be_on: bool, // true = should be on hook, false = should be off hook
 }
 
 impl CallControlState {
@@ -41,6 +43,8 @@ impl CallControlState {
                 end_call_visible: false,
                 end_call_label: "End Call",
                 end_call_style: ButtonStyle::Danger,
+                hook_enabled: true,
+                hook_should_be_on: true, // Ready to receive calls when idle
             },
             
             Some(CallState::Calling) => Self {
@@ -56,6 +60,8 @@ impl CallControlState {
                 end_call_visible: true,
                 end_call_label: "Cancel Call",
                 end_call_style: ButtonStyle::Danger,
+                hook_enabled: false,
+                hook_should_be_on: false, // Off hook when calling
             },
             
             Some(CallState::Ringing) => Self {
@@ -71,6 +77,8 @@ impl CallControlState {
                 end_call_visible: true,
                 end_call_label: "Reject",
                 end_call_style: ButtonStyle::Danger,
+                hook_enabled: false,
+                hook_should_be_on: false, // Off hook when ringing (incoming call)
             },
             
             Some(CallState::Connected) => Self {
@@ -86,6 +94,8 @@ impl CallControlState {
                 end_call_visible: true,
                 end_call_label: "End Call",
                 end_call_style: ButtonStyle::Danger,
+                hook_enabled: false,
+                hook_should_be_on: false, // Off hook during active call
             },
             
             Some(CallState::OnHold) => Self {
@@ -101,6 +111,8 @@ impl CallControlState {
                 end_call_visible: true,
                 end_call_label: "End Call",
                 end_call_style: ButtonStyle::Danger,
+                hook_enabled: false,
+                hook_should_be_on: false, // Off hook when call is on hold
             },
             
             Some(CallState::Transferring) => Self {
@@ -116,6 +128,8 @@ impl CallControlState {
                 end_call_visible: true,
                 end_call_label: "Cancel Transfer",
                 end_call_style: ButtonStyle::Warning,
+                hook_enabled: false,
+                hook_should_be_on: false, // Off hook during transfer
             },
             
             _ => Self {
@@ -131,6 +145,8 @@ impl CallControlState {
                 end_call_visible: false,
                 end_call_label: "End Call",
                 end_call_style: ButtonStyle::Danger,
+                hook_enabled: true,
+                hook_should_be_on: true, // Default to on hook
             },
         }
     }

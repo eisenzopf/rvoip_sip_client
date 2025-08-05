@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use std::sync::Arc;
 use crate::sip_client::{CallInfo, SipClientManager, CallState};
 use crate::components::{UserInfoBar, CallStatus, CallControls};
+use crate::components::call_control_state::CallControlState;
 
 #[component]
 pub fn CallInterfaceScreen(
@@ -14,31 +15,42 @@ pub fn CallInterfaceScreen(
     on_hangup_call: EventHandler<()>,
     on_logout: EventHandler<()>
 ) -> Element {
-    // Determine connection mode based on server_uri
+    // Determine connection mode from the actual SipClientManager config
     let is_p2p_mode = server_uri.contains('@');
-    let is_receiver_mode = server_uri.is_empty();
+    let is_receiver_mode = use_signal(|| false);
     
     // Get listening address for receiver mode
     let listening_address = use_signal(|| "Loading...".to_string());
     
-    // Fetch listening address on mount if in receiver mode
-    if is_receiver_mode {
-        use_effect({
-            let sip_client = sip_client.clone();
-            let mut listening_address = listening_address.clone();
-            move || {
-                spawn(async move {
-                    let client = sip_client.read().clone();
-                    let guard = client.read().await;
-                    if let Some(addr) = guard.get_listening_address() {
-                        listening_address.set(addr);
-                    } else {
-                        listening_address.set("Not available".to_string());
-                    }
-                });
-            }
-        });
-    }
+    // Track hook state
+    let is_on_hook = use_signal(|| true);
+    
+    // Fetch the actual connection mode, listening address, and hook state on mount
+    use_effect({
+        let sip_client = sip_client.clone();
+        let mut listening_address = listening_address.clone();
+        let mut is_receiver_mode = is_receiver_mode.clone();
+        let mut is_on_hook = is_on_hook.clone();
+        move || {
+            spawn(async move {
+                let client = sip_client.read().clone();
+                let guard = client.read().await;
+                
+                // Check if we're actually in receiver mode
+                is_receiver_mode.set(guard.is_receiver_mode());
+                
+                // Get current hook state
+                is_on_hook.set(guard.is_on_hook().await);
+                
+                // Get listening address if in receiver mode
+                if let Some(addr) = guard.get_listening_address() {
+                    listening_address.set(addr);
+                } else if guard.is_receiver_mode() {
+                    listening_address.set("Not available".to_string());
+                }
+            });
+        }
+    });
     
     // Timer to update call duration every second
     use_effect(move || {
@@ -82,13 +94,36 @@ pub fn CallInterfaceScreen(
     let call_state = call_info.as_ref().map(|c| c.state.clone());
     let is_muted = call_info.as_ref().and_then(|c| c.is_muted).unwrap_or(false);
     
+    // Get the control state to determine desired hook state
+    let control_state = CallControlState::from_call_state(call_state.as_ref(), is_muted);
+    
+    // Automatically update hook state based on call state
+    use_effect({
+        let sip_client = sip_client.clone();
+        let control_state = control_state.clone();
+        let mut is_on_hook = is_on_hook.clone();
+        move || {
+            if *is_on_hook.read() != control_state.hook_should_be_on {
+                spawn(async move {
+                    let client = sip_client.read().clone();
+                    let guard = client.read().await;
+                    if let Ok(_) = guard.set_hook_state(control_state.hook_should_be_on).await {
+                        is_on_hook.set(control_state.hook_should_be_on);
+                    }
+                });
+            }
+        }
+    });
+    
     // Compute status text
-    let status_text = if is_receiver_mode {
+    let status_text = if *is_receiver_mode.read() {
         format!("Listening on: {}", listening_address.read())
     } else if is_p2p_mode {
         format!("Direct to: {}", server_uri)
-    } else {
+    } else if !server_uri.is_empty() {
         format!("Server: {}", server_uri)
+    } else {
+        "Not connected to server".to_string()
     };
     
     rsx! {
@@ -100,7 +135,7 @@ pub fn CallInterfaceScreen(
                 username: username.clone(),
                 server_uri: server_uri.clone(),
                 status_text: status_text,
-                is_receiver_mode: is_receiver_mode,
+                is_receiver_mode: *is_receiver_mode.read(),
                 is_p2p_mode: is_p2p_mode,
                 on_logout: move |_| on_logout.call(())
             }
@@ -116,9 +151,10 @@ pub fn CallInterfaceScreen(
             CallControls {
                 call_state: call_state,
                 is_muted: is_muted,
+                is_on_hook: *is_on_hook.read(),
                 call_target: call_target.clone(),
                 is_p2p_mode: is_p2p_mode,
-                is_receiver_mode: is_receiver_mode,
+                is_receiver_mode: *is_receiver_mode.read(),
                 on_make_call: move |_| on_make_call.call(()),
                 on_mute_toggle: move |_| {
                     let sip_client = sip_client.clone();
@@ -145,6 +181,17 @@ pub fn CallInterfaceScreen(
                 on_transfer: move |_| {
                     // TODO: Open transfer dialog
                     log::info!("Transfer button clicked");
+                },
+                on_hook_toggle: move |_| {
+                    let sip_client = sip_client.clone();
+                    let mut is_on_hook = is_on_hook.clone();
+                    spawn(async move {
+                        let client = sip_client.read().clone();
+                        let guard = client.read().await;
+                        if let Ok(new_state) = guard.toggle_hook().await {
+                            is_on_hook.set(new_state);
+                        }
+                    });
                 },
                 on_end_call: move |_| on_hangup_call.call(())
             }
