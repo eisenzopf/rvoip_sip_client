@@ -215,12 +215,14 @@ impl SipClientManager {
                             *current_call.write().await = Some(call_info);
                         }
                         SipClientEvent::CallStateChanged { call, new_state, .. } => {
+                            info!("Call state changed: {:?} -> {:?}", call.id, new_state);
                             if let Some(info) = current_call.write().await.as_mut() {
                                 if info.id == call.id.to_string() {
                                     info.state = CallState::from(new_state.clone());
                                     if *new_state == SipCallState::Connected && info.connected_at.is_none() {
                                         info.connected_at = Some(chrono::Utc::now());
                                     }
+                                    info!("Updated call info state to: {:?}", info.state);
                                 }
                             }
                         }
@@ -372,7 +374,10 @@ impl SipClientManager {
                             Ok(_) => {
                                 // Update call state to connected
                                 if let Some(call) = self.current_call.write().await.as_mut() {
+                                    info!("Manually updating call state from {:?} to Connected after answering", call.state);
                                     call.state = CallState::Connected;
+                                    call.connected_at = Some(chrono::Utc::now());
+                                    info!("Call state after manual update: {:?}", call.state);
                                 }
                                 Ok(())
                             }
