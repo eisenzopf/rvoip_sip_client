@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig, ConnectionMode};
 use crate::event_channel::EventChannel;
 use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen};
-use rvoip::sip_client::SipClientEvent;
+use rvoip::sip_client::{SipClientEvent, CallState as SipCallState};
 
 #[derive(Clone, Debug, PartialEq)]
 enum AppState {
@@ -48,6 +48,7 @@ pub fn App() -> Element {
         let event_channel = event_channel.clone();
         let mut app_state = app_state.clone();
         let mut last_event = last_event.clone();
+        let mut current_call = current_call.clone();
         move || {
             spawn(async move {
                 loop {
@@ -59,6 +60,47 @@ pub fn App() -> Element {
                                 SipClientEvent::IncomingCall { from, .. } => {
                                     info!("Incoming call from: {}", from);
                                     app_state.set(AppState::IncomingCall { caller_id: from.clone() });
+                                }
+                                SipClientEvent::CallStateChanged { call, new_state, .. } => {
+                                    info!("UI: Received CallStateChanged event, state: {:?}", new_state);
+                                    // Update the UI's current call state immediately
+                                    let should_update = current_call.read().as_ref()
+                                        .map(|info| info.id == call.id.to_string())
+                                        .unwrap_or(false);
+                                    
+                                    if should_update {
+                                        let mut current_call_info = current_call.read().clone().unwrap();
+                                        current_call_info.state = CallState::from(new_state.clone());
+                                        if *new_state == SipCallState::Connected && current_call_info.connected_at.is_none() {
+                                            current_call_info.connected_at = Some(chrono::Utc::now());
+                                        }
+                                        info!("UI: Updated call state to {:?}", current_call_info.state);
+                                        current_call.set(Some(current_call_info));
+                                    }
+                                }
+                                SipClientEvent::CallOnHold { call } => {
+                                    info!("UI: Call put on hold");
+                                    if let Some(info) = current_call.write().as_mut() {
+                                        if info.id == call.id.to_string() {
+                                            info.state = CallState::OnHold;
+                                        }
+                                    }
+                                }
+                                SipClientEvent::CallResumed { call } => {
+                                    info!("UI: Call resumed");
+                                    if let Some(info) = current_call.write().as_mut() {
+                                        if info.id == call.id.to_string() {
+                                            info.state = CallState::Connected;
+                                        }
+                                    }
+                                }
+                                SipClientEvent::CallTransferred { call, target } => {
+                                    info!("UI: Call transferred to {}", target);
+                                    if let Some(info) = current_call.write().as_mut() {
+                                        if info.id == call.id.to_string() {
+                                            info.state = CallState::Transferring;
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
@@ -82,6 +124,9 @@ pub fn App() -> Element {
                 loop {
                     // Update current call state
                     if let Some(call) = sip_client_clone.read().await.get_current_call().await {
+                        if current_call.read().as_ref().map(|c| &c.state) != Some(&call.state) {
+                            info!("App: Updating UI call state to {:?}", call.state);
+                        }
                         current_call.set(Some(call));
                     } else {
                         current_call.set(None);

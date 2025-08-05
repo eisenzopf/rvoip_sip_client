@@ -3,81 +3,85 @@ use crate::sip_client::{CallInfo, CallState};
 
 #[component]
 pub fn CallStatus(
-    call: CallInfo,
-    on_hangup: EventHandler<()>
+    call: Signal<Option<CallInfo>>
 ) -> Element {
+    let Some(call_info) = call.read().clone() else {
+        return rsx! { div {} };
+    };
+    
+    // Format status text with additional state info
+    let status_text = match call_info.state {
+        CallState::Calling => "Calling...".to_string(),
+        CallState::Ringing => "Ringing...".to_string(),
+        CallState::Connected => {
+            if let Some(duration) = &call_info.duration {
+                format!("Connected • {:02}:{:02}", duration.as_secs() / 60, duration.as_secs() % 60)
+            } else {
+                "Connected".to_string()
+            }
+        },
+        CallState::OnHold => {
+            if let Some(duration) = &call_info.duration {
+                format!("On Hold • {:02}:{:02}", duration.as_secs() / 60, duration.as_secs() % 60)
+            } else {
+                "On Hold".to_string()
+            }
+        },
+        CallState::Transferring => "Transferring...".to_string(),
+        CallState::Disconnected => "Call Ended".to_string(),
+        _ => "Unknown".to_string(),
+    };
+    
+    // Add visual indicators based on state
+    let status_icon = match call_info.state {
+        CallState::Calling => "🔄",
+        CallState::Ringing => "🔔",
+        CallState::Connected => "",
+        CallState::OnHold => "⏸️",
+        CallState::Transferring => "⏳",
+        _ => "",
+    };
+    
     rsx! {
         div {
-            class: "bg-gray-50 rounded-xl p-6 border border-gray-200",
+            class: "bg-white rounded-xl p-8 shadow-sm border border-gray-200 text-center",
             
-            h3 {
-                class: "text-lg font-medium text-gray-800 mb-4",
-                "Active Call"
-            }
-            
+            // Remote party (larger, more prominent)
             div {
-                class: "space-y-3 mb-6",
-                
-                div {
-                    class: "flex justify-between items-center",
-                    span {
-                        class: "text-gray-600 text-sm",
-                        "Remote Party:"
-                    }
-                    span {
-                        class: "text-gray-800 text-sm font-medium",
-                        "{call.remote_uri}"
-                    }
-                }
-                
-                div {
-                    class: "flex justify-between items-center",
-                    span {
-                        class: "text-gray-600 text-sm",
-                        "Status:"
-                    }
-                    span {
-                        class: match call.state {
-                            CallState::Calling => "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800",
-                            CallState::Ringing => "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 animate-pulse",
-                            CallState::Connected => "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800",
-                            CallState::Disconnected => "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800",
-                            _ => "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800",
-                        },
-                        match call.state {
-                            CallState::Calling => "Calling...",
-                            CallState::Ringing => "Ringing...",
-                            CallState::Connected => "Connected",
-                            CallState::Disconnected => "Ended",
-                            _ => "Unknown",
-                        }
-                    }
-                }
-                
-                if matches!(call.state, CallState::Connected) {
-                    if let Some(duration) = &call.duration {
-                        div {
-                            class: "flex justify-between items-center",
-                            span {
-                                class: "text-gray-600 text-sm",
-                                "Duration:"
-                            }
-                            span {
-                                class: "text-gray-800 text-sm font-medium font-mono",
-                                "{duration.as_secs() / 60:02}:{duration.as_secs() % 60:02}"
-                            }
-                        }
-                    }
+                class: "mb-2",
+                h2 {
+                    class: "text-2xl font-semibold text-gray-900",
+                    "{call_info.remote_uri}"
                 }
             }
             
-            button {
-                class: "w-full px-4 py-3 bg-red-600 hover:bg-red-700 text-white rounded-md text-sm font-medium transition-colors",
-                onclick: move |_| on_hangup.call(()),
-                if matches!(call.state, CallState::Ringing) {
-                    "Reject"
-                } else {
-                    "Hang Up"
+            // Status with icon
+            div {
+                class: "flex items-center justify-center gap-2",
+                if !status_icon.is_empty() {
+                    span {
+                        class: if matches!(call_info.state, CallState::Calling | CallState::Ringing) {
+                            "animate-pulse"
+                        } else {
+                            ""
+                        },
+                        "{status_icon}"
+                    }
+                }
+                span {
+                    class: "text-lg text-gray-600",
+                    "{status_text}"
+                }
+            }
+            
+            // Additional status info for special states
+            if call_info.is_muted.unwrap_or(false) {
+                div {
+                    class: "mt-2",
+                    span {
+                        class: "inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-red-100 text-red-800",
+                        "🔇 Muted"
+                    }
                 }
             }
         }

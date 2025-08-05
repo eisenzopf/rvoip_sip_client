@@ -202,20 +202,24 @@ pub fn RegistrationScreen(
                 }
             }
             
-            button {
-                class: {
-                    let class_str = if is_loading { 
-                        "w-full py-3 px-4 bg-gray-400 text-white rounded-md text-sm font-medium cursor-not-allowed"
-                    } else if username.read().is_empty() {
-                        "w-full py-3 px-4 bg-gray-300 text-gray-500 rounded-md text-sm font-medium cursor-not-allowed"
-                    } else {
-                        "w-full py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white rounded-md text-sm font-medium cursor-pointer transition-colors"
-                    };
-                    class_str
-                },
-                onclick: move |_| if !is_loading && !username.read().is_empty() { on_register.call(()) },
-                disabled: is_loading || username.read().is_empty(),
-                if is_loading { "Connecting..." } else { "Next" }
+            // Button container - right justified
+            div {
+                class: "flex justify-end",
+                button {
+                    class: {
+                        let class_str = if is_loading { 
+                            "px-8 py-3 bg-gray-400 text-white rounded-md text-sm font-medium cursor-not-allowed"
+                        } else if username.read().is_empty() {
+                            "px-8 py-3 bg-gray-300 text-gray-500 rounded-md text-sm font-medium cursor-not-allowed"
+                        } else {
+                            "px-8 py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-md text-sm font-medium cursor-pointer transition-colors"
+                        };
+                        class_str
+                    },
+                    onclick: move |_| if !is_loading && !username.read().is_empty() { on_register.call(()) },
+                    disabled: is_loading || username.read().is_empty(),
+                    if is_loading { "Connecting..." } else { "Login" }
+                }
             }
         }
     }

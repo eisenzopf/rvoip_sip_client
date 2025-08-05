@@ -51,6 +51,8 @@ pub enum CallState {
     Calling,
     Ringing,
     Connected,
+    OnHold,
+    Transferring,
     Disconnected,
     Error(String),
 }
@@ -62,8 +64,8 @@ impl From<SipCallState> for CallState {
             SipCallState::Ringing => CallState::Ringing,
             SipCallState::IncomingRinging => CallState::Ringing,
             SipCallState::Connected => CallState::Connected,
-            SipCallState::OnHold => CallState::Connected, // Still connected but on hold
-            SipCallState::Transferring => CallState::Connected, // Still connected during transfer
+            SipCallState::OnHold => CallState::OnHold,
+            SipCallState::Transferring => CallState::Transferring,
             SipCallState::Terminated => CallState::Disconnected,
         }
     }
@@ -77,6 +79,7 @@ pub struct CallInfo {
     pub duration: Option<Duration>,
     pub is_incoming: bool,
     pub connected_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub is_muted: Option<bool>,
 }
 
 pub struct SipClientManager {
@@ -196,6 +199,9 @@ impl SipClientManager {
             
             let task = tokio::spawn(async move {
                 while let Some(event) = events.next().await {
+                    // Log all received events
+                    info!("Received event: {:?}", event);
+                    
                     // Send event to UI if sender is available
                     if let Some(sender) = &event_sender {
                         let _ = sender.send(event.clone());
@@ -211,6 +217,7 @@ impl SipClientManager {
                                 duration: None,
                                 is_incoming: true,
                                 connected_at: None,
+                                is_muted: Some(false),
                             };
                             *current_call.write().await = Some(call_info);
                         }
@@ -223,18 +230,6 @@ impl SipClientManager {
                                         info.connected_at = Some(chrono::Utc::now());
                                     }
                                     info!("Updated call info state to: {:?}", info.state);
-                                }
-                            }
-                        }
-                        SipClientEvent::CallConnected { call_id, codec, .. } => {
-                            info!("Call connected event received: {:?} with codec: {}", call_id, codec);
-                            if let Some(info) = current_call.write().await.as_mut() {
-                                if info.id == call_id.to_string() {
-                                    info!("Updating call state to Connected via CallConnected event");
-                                    info.state = CallState::Connected;
-                                    if info.connected_at.is_none() {
-                                        info.connected_at = Some(chrono::Utc::now());
-                                    }
                                 }
                             }
                         }
@@ -255,7 +250,9 @@ impl SipClientManager {
                             };
                             *registration_state.write().await = state;
                         }
-                        _ => {}
+                        _ => {
+                            info!("Unhandled event: {:?}", event);
+                        }
                     }
                 }
             });
@@ -328,6 +325,7 @@ impl SipClientManager {
                         duration: None,
                         is_incoming: false,
                         connected_at: None,
+                        is_muted: Some(false),
                     };
 
                     *self.current_call.write().await = Some(call_info);
@@ -384,13 +382,18 @@ impl SipClientManager {
                     if let Ok(call_id) = CallId::parse_str(&call_info.id) {
                         match client.answer(&call_id).await {
                             Ok(_) => {
+                                info!("Answer call succeeded, updating state...");
                                 // Update call state to connected
-                                if let Some(call) = self.current_call.write().await.as_mut() {
+                                let mut current_call_guard = self.current_call.write().await;
+                                if let Some(call) = current_call_guard.as_mut() {
                                     info!("Manually updating call state from {:?} to Connected after answering", call.state);
                                     call.state = CallState::Connected;
                                     call.connected_at = Some(chrono::Utc::now());
                                     info!("Call state after manual update: {:?}", call.state);
+                                } else {
+                                    error!("Current call is None after answering!");
                                 }
+                                drop(current_call_guard);
                                 Ok(())
                             }
                             Err(e) => {
@@ -457,6 +460,12 @@ impl SipClientManager {
                 if let Ok(call_id) = CallId::parse_str(&call_info.id) {
                     let current_state = client.is_muted(&call_id).await?;
                     client.set_mute(&call_id, !current_state).await?;
+                    
+                    // Update the mute state in CallInfo
+                    if let Some(info) = self.current_call.write().await.as_mut() {
+                        info.is_muted = Some(!current_state);
+                    }
+                    
                     Ok(!current_state)
                 } else {
                     Ok(false)
@@ -483,6 +492,72 @@ impl SipClientManager {
             }
         } else {
             false
+        }
+    }
+    
+    /// Put the current call on hold
+    pub async fn hold(&self) -> Result<()> {
+        if let Some(call_info) = self.current_call.read().await.as_ref() {
+            if let Some(client) = &self.client {
+                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    client.hold(&call_id).await?;
+                    // State will be updated by event handler
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Invalid call ID format"))
+                }
+            } else {
+                Err(anyhow::anyhow!("Client not initialized"))
+            }
+        } else {
+            Err(anyhow::anyhow!("No active call"))
+        }
+    }
+    
+    /// Resume a held call
+    pub async fn resume(&self) -> Result<()> {
+        if let Some(call_info) = self.current_call.read().await.as_ref() {
+            if let Some(client) = &self.client {
+                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    client.resume(&call_id).await?;
+                    // State will be updated by event handler
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Invalid call ID format"))
+                }
+            } else {
+                Err(anyhow::anyhow!("Client not initialized"))
+            }
+        } else {
+            Err(anyhow::anyhow!("No active call"))
+        }
+    }
+    
+    /// Check if the call is on hold
+    pub async fn is_on_hold(&self) -> bool {
+        if let Some(call_info) = self.current_call.read().await.as_ref() {
+            matches!(call_info.state, CallState::OnHold)
+        } else {
+            false
+        }
+    }
+    
+    /// Transfer the current call to another party
+    pub async fn transfer(&self, target_uri: &str) -> Result<()> {
+        if let Some(call_info) = self.current_call.read().await.as_ref() {
+            if let Some(client) = &self.client {
+                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    client.transfer(&call_id, target_uri).await?;
+                    // State will be updated by event handler
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Invalid call ID format"))
+                }
+            } else {
+                Err(anyhow::anyhow!("Client not initialized"))
+            }
+        } else {
+            Err(anyhow::anyhow!("No active call"))
         }
     }
     

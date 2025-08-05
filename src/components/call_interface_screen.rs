@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use std::sync::Arc;
 use crate::sip_client::{CallInfo, SipClientManager, CallState};
-use crate::components::{UserInfoBar, CallStatus, MakeCallForm};
+use crate::components::{UserInfoBar, CallStatus, CallControls};
 
 #[component]
 pub fn CallInterfaceScreen(
@@ -45,7 +45,7 @@ pub fn CallInterfaceScreen(
         let call_state = current_call.read().clone();
         
         if let Some(call) = call_state {
-            if matches!(call.state, CallState::Connected) {
+            if matches!(call.state, CallState::Connected | CallState::OnHold) {
                 if let Some(_connected_time) = call.connected_at {
                     let mut current_call_clone = current_call.clone();
                     
@@ -55,7 +55,7 @@ pub fn CallInterfaceScreen(
                             
                             let call_data = current_call_clone.read().clone();
                             if let Some(mut call) = call_data {
-                                if matches!(call.state, CallState::Connected) {
+                                if matches!(call.state, CallState::Connected | CallState::OnHold) {
                                     if let Some(connected_time) = call.connected_at {
                                         let now = chrono::Utc::now();
                                         let duration = now.signed_duration_since(connected_time);
@@ -77,8 +77,10 @@ pub fn CallInterfaceScreen(
         }
     });
     
-    // Check if we have an active call
-    let has_active_call = current_call.read().is_some();
+    // Get current call info
+    let call_info = current_call.read().clone();
+    let call_state = call_info.as_ref().map(|c| c.state.clone());
+    let is_muted = call_info.as_ref().and_then(|c| c.is_muted).unwrap_or(false);
     
     // Compute status text
     let status_text = if is_receiver_mode {
@@ -103,30 +105,49 @@ pub fn CallInterfaceScreen(
                 on_logout: move |_| on_logout.call(())
             }
             
-            // Call interface
-            div {
-                class: "bg-white rounded-xl p-8 shadow-sm border border-gray-200",
-                
-                // Only show call input if not in an active call
-                if !has_active_call {
-                    MakeCallForm {
-                        call_target: call_target.clone(),
-                        has_active_call: has_active_call,
-                        is_p2p_mode: is_p2p_mode,
-                        is_receiver_mode: is_receiver_mode,
-                        on_make_call: move |_| on_make_call.call(())
-                    }
-                }
-            }
-            
-            // Current call status
-            if let Some(call) = current_call.read().clone() {
+            // Call status display (only shown during active call)
+            if current_call.read().is_some() {
                 CallStatus {
-                    call: call,
-                    on_hangup: move |_| on_hangup_call.call(())
+                    call: current_call.clone()
                 }
             }
             
+            // Call controls - always visible
+            CallControls {
+                call_state: call_state,
+                is_muted: is_muted,
+                call_target: call_target.clone(),
+                is_p2p_mode: is_p2p_mode,
+                is_receiver_mode: is_receiver_mode,
+                on_make_call: move |_| on_make_call.call(()),
+                on_mute_toggle: move |_| {
+                    let sip_client = sip_client.clone();
+                    spawn(async move {
+                        let client = sip_client.read().clone();
+                        let guard = client.read().await;
+                        let _ = guard.toggle_mute().await;
+                    });
+                },
+                on_hold_toggle: move |_| {
+                    let sip_client = sip_client.clone();
+                    spawn(async move {
+                        let client = sip_client.read().clone();
+                        let guard = client.read().await;
+                        
+                        // Check if on hold
+                        if guard.is_on_hold().await {
+                            let _ = guard.resume().await;
+                        } else {
+                            let _ = guard.hold().await;
+                        }
+                    });
+                },
+                on_transfer: move |_| {
+                    // TODO: Open transfer dialog
+                    log::info!("Transfer button clicked");
+                },
+                on_end_call: move |_| on_hangup_call.call(())
+            }
         }
     }
 }
