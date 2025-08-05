@@ -79,7 +79,6 @@ pub fn CallInterfaceScreen(
     
     // Check if we have an active call
     let has_active_call = current_call.read().is_some();
-    let call_info = current_call.read().clone();
     
     // Compute status text
     let status_text = if is_receiver_mode {
@@ -121,7 +120,7 @@ pub fn CallInterfaceScreen(
             }
             
             // Current call status
-            if let Some(call) = call_info {
+            if let Some(call) = current_call.read().clone() {
                 CallStatus {
                     call: call,
                     on_hangup: move |_| on_hangup_call.call(())
