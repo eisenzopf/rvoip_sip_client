@@ -13,10 +13,11 @@ fn main() {
     
     info!("Starting SIP Client");
     
-    // Launch the Dioxus desktop application with custom window title
+    // Launch the Dioxus desktop application with custom window title and size
     dioxus::LaunchBuilder::desktop()
         .with_cfg(dioxus::desktop::Config::new()
             .with_window(dioxus::desktop::WindowBuilder::new()
-                .with_title("RVOIP SIP Client")))
+                .with_title("RVOIP SIP Client")
+                .with_inner_size(dioxus::desktop::LogicalSize::new(600.0, 800.0))))
         .launch(App);
 } 

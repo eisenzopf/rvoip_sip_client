@@ -373,10 +373,10 @@ pub fn App() -> Element {
         }
         
         div {
-            class: "font-sans h-screen bg-gray-50 m-0 p-0",
+            class: "font-sans h-screen bg-gray-50 m-0 p-0 flex flex-col",
             
             div {
-                class: "px-5 pt-6",
+                class: "px-5 pt-6 pb-6 flex-grow flex flex-col",
                 match current_state {
                     AppState::Registration => rsx! {
                         RegistrationScreen {

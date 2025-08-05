@@ -138,70 +138,78 @@ pub fn CallInterfaceScreen(
     
     rsx! {
         div {
-            class: "flex flex-col gap-6",
+            class: "flex flex-col gap-6 h-full",
             
-            // User info bar
-            UserInfoBar {
-                username: username.clone(),
-                status_text: status_text,
-                on_logout: move |_| on_logout.call(())
-            }
-            
-            // Call status display (only shown during active call)
-            if current_call.read().is_some() {
-                CallStatus {
-                    call: current_call.clone()
+            // Main content area that grows
+            div {
+                class: "flex-grow flex flex-col gap-6",
+                
+                // User info bar
+                UserInfoBar {
+                    username: username.clone(),
+                    status_text: status_text,
+                    on_logout: move |_| on_logout.call(())
                 }
-            }
-            
-            // Call controls - always visible
-            CallControls {
-                call_state: call_state,
-                is_muted: is_muted,
-                is_on_hook: *is_on_hook.read(),
-                call_target: call_target.clone(),
-                is_p2p_mode: is_p2p_mode,
-                is_receiver_mode: *is_receiver_mode.read(),
-                on_make_call: move |_| on_make_call.call(()),
-                on_mute_toggle: move |_| {
-                    let sip_client = sip_client.clone();
-                    spawn(async move {
-                        let client = sip_client.read().clone();
-                        let guard = client.read().await;
-                        let _ = guard.toggle_mute().await;
-                    });
-                },
-                on_hold_toggle: move |_| {
-                    let sip_client = sip_client.clone();
-                    spawn(async move {
-                        let client = sip_client.read().clone();
-                        let guard = client.read().await;
-                        
-                        // Check if on hold
-                        if guard.is_on_hold().await {
-                            let _ = guard.resume().await;
-                        } else {
-                            let _ = guard.hold().await;
-                        }
-                    });
-                },
-                on_transfer: move |_| {
-                    // TODO: Open transfer dialog
-                    log::info!("Transfer button clicked");
-                },
-                on_hook_toggle: move |_| {
-                    let sip_client = sip_client.clone();
-                    let mut is_on_hook = is_on_hook.clone();
-                    spawn(async move {
-                        let client = sip_client.read().clone();
-                        let guard = client.read().await;
-                        if let Ok(new_state) = guard.toggle_hook().await {
-                            log::info!("Hook toggled to: {}", if new_state { "on hook" } else { "off hook" });
-                            is_on_hook.set(new_state);
-                        }
-                    });
-                },
-                on_end_call: move |_| on_hangup_call.call(())
+                
+                // Call status display (only shown during active call)
+                if current_call.read().is_some() {
+                    CallStatus {
+                        call: current_call.clone()
+                    }
+                }
+                
+                // Call controls - always visible
+                div {
+                    class: "mt-4",
+                    CallControls {
+                    call_state: call_state,
+                    is_muted: is_muted,
+                    is_on_hook: *is_on_hook.read(),
+                    call_target: call_target.clone(),
+                    is_p2p_mode: is_p2p_mode,
+                    is_receiver_mode: *is_receiver_mode.read(),
+                    on_make_call: move |_| on_make_call.call(()),
+                    on_mute_toggle: move |_| {
+                        let sip_client = sip_client.clone();
+                        spawn(async move {
+                            let client = sip_client.read().clone();
+                            let guard = client.read().await;
+                            let _ = guard.toggle_mute().await;
+                        });
+                    },
+                    on_hold_toggle: move |_| {
+                        let sip_client = sip_client.clone();
+                        spawn(async move {
+                            let client = sip_client.read().clone();
+                            let guard = client.read().await;
+                            
+                            // Check if on hold
+                            if guard.is_on_hold().await {
+                                let _ = guard.resume().await;
+                            } else {
+                                let _ = guard.hold().await;
+                            }
+                        });
+                    },
+                    on_transfer: move |_| {
+                        // TODO: Open transfer dialog
+                        log::info!("Transfer button clicked");
+                    },
+                    on_hook_toggle: move |_| {
+                        let sip_client = sip_client.clone();
+                        let mut is_on_hook = is_on_hook.clone();
+                        spawn(async move {
+                            let client = sip_client.read().clone();
+                            let guard = client.read().await;
+                            if let Ok(new_state) = guard.toggle_hook().await {
+                                log::info!("Hook toggled to: {}", if new_state { "on hook" } else { "off hook" });
+                                is_on_hook.set(new_state);
+                            }
+                        });
+                    },
+                    on_end_call: move |_| on_hangup_call.call(())
+                    }
+                }
             }
             
             // Hook status at the bottom
