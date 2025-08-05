@@ -25,6 +25,7 @@ pub struct CallControlState {
     pub end_call_style: ButtonStyle,
     pub hook_enabled: bool,
     pub hook_should_be_on: bool, // true = should be on hook, false = should be off hook
+    pub hook_style: ButtonStyle,
 }
 
 impl CallControlState {
@@ -45,6 +46,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: true,
                 hook_should_be_on: true, // Ready to receive calls when idle
+                hook_style: ButtonStyle::Normal,
             },
             
             Some(CallState::Calling) => Self {
@@ -62,6 +64,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: false,
                 hook_should_be_on: false, // Off hook when calling
+                hook_style: ButtonStyle::Disabled,
             },
             
             Some(CallState::Ringing) => Self {
@@ -79,6 +82,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: false,
                 hook_should_be_on: false, // Off hook when ringing (incoming call)
+                hook_style: ButtonStyle::Disabled,
             },
             
             Some(CallState::Connected) => Self {
@@ -96,6 +100,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: false,
                 hook_should_be_on: false, // Off hook during active call
+                hook_style: ButtonStyle::Disabled,
             },
             
             Some(CallState::OnHold) => Self {
@@ -113,6 +118,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: false,
                 hook_should_be_on: false, // Off hook when call is on hold
+                hook_style: ButtonStyle::Disabled,
             },
             
             Some(CallState::Transferring) => Self {
@@ -130,6 +136,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Warning,
                 hook_enabled: false,
                 hook_should_be_on: false, // Off hook during transfer
+                hook_style: ButtonStyle::Disabled,
             },
             
             _ => Self {
@@ -147,6 +154,7 @@ impl CallControlState {
                 end_call_style: ButtonStyle::Danger,
                 hook_enabled: true,
                 hook_should_be_on: true, // Default to on hook
+                hook_style: ButtonStyle::Normal,
             },
         }
     }

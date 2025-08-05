@@ -159,20 +159,32 @@ pub fn CallControls(
                 button {
                     class: if control_state.hook_enabled {
                         if is_on_hook {
-                            "w-16 h-16 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center"
+                            "w-16 h-16 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center relative"
                         } else {
-                            "w-16 h-16 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center"
+                            "w-16 h-16 bg-orange-600 hover:bg-orange-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center relative"
                         }
                     } else {
                         "w-16 h-16 bg-gray-100 text-gray-400 rounded-lg cursor-not-allowed opacity-50 flex items-center justify-center"
                     },
                     disabled: !control_state.hook_enabled,
                     onclick: move |_| if control_state.hook_enabled { on_hook_toggle.call(()) },
-                    title: if is_on_hook { "Go off hook (stop receiving calls)" } else { "Go on hook (receive calls)" },
-                    PhoneIncoming {
-                        size: 24,
-                        color: "currentColor",
-                        stroke_width: 2
+                    title: if is_on_hook { "Click to stop receiving calls" } else { "Click to start receiving calls" },
+                    div {
+                        class: "relative",
+                        PhoneIncoming {
+                            size: 24,
+                            color: "currentColor",
+                            stroke_width: 2
+                        }
+                        if control_state.hook_enabled && !is_on_hook {
+                            // Add a visual indicator for off-hook state
+                            div {
+                                class: "absolute -top-1 -right-1 w-3 h-3 bg-white rounded-full",
+                                div {
+                                    class: "absolute inset-0.5 bg-orange-600 rounded-full"
+                                }
+                            }
+                        }
                     }
                 }
             }

@@ -116,14 +116,12 @@ pub fn CallInterfaceScreen(
     });
     
     // Compute status text
-    let status_text = if *is_receiver_mode.read() {
-        format!("Listening on: {}", listening_address.read())
-    } else if is_p2p_mode {
-        format!("Direct to: {}", server_uri)
+    let status_text = if is_p2p_mode {
+        format!("P2P: {}", server_uri)
     } else if !server_uri.is_empty() {
         format!("Server: {}", server_uri)
     } else {
-        "Not connected to server".to_string()
+        "No server configured".to_string()
     };
     
     rsx! {
@@ -133,10 +131,7 @@ pub fn CallInterfaceScreen(
             // User info bar
             UserInfoBar {
                 username: username.clone(),
-                server_uri: server_uri.clone(),
                 status_text: status_text,
-                is_receiver_mode: *is_receiver_mode.read(),
-                is_p2p_mode: is_p2p_mode,
                 on_logout: move |_| on_logout.call(())
             }
             
@@ -194,6 +189,48 @@ pub fn CallInterfaceScreen(
                     });
                 },
                 on_end_call: move |_| on_hangup_call.call(())
+            }
+            
+            // Receiver mode status at the bottom
+            if *is_receiver_mode.read() || *is_on_hook.read() {
+                div {
+                    class: "bg-gray-50 rounded-xl px-6 py-4 border border-gray-200",
+                    div {
+                        class: "flex items-center justify-between",
+                        div {
+                            class: "flex items-center gap-3",
+                            if *is_on_hook.read() {
+                                span {
+                                    class: "inline-flex items-center gap-2",
+                                    span { 
+                                        class: "w-2 h-2 bg-green-500 rounded-full animate-pulse",
+                                    }
+                                    span {
+                                        class: "text-sm font-medium text-gray-700",
+                                        "Ready to receive calls"
+                                    }
+                                }
+                            } else {
+                                span {
+                                    class: "inline-flex items-center gap-2",
+                                    span { 
+                                        class: "w-2 h-2 bg-gray-400 rounded-full",
+                                    }
+                                    span {
+                                        class: "text-sm font-medium text-gray-600",
+                                        "Not receiving calls"
+                                    }
+                                }
+                            }
+                        }
+                        if *is_receiver_mode.read() {
+                            div {
+                                class: "text-sm text-gray-600",
+                                "Listening on: {listening_address.read()}"
+                            }
+                        }
+                    }
+                }
             }
         }
     }
