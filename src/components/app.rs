@@ -321,18 +321,17 @@ pub fn App() -> Element {
     let current_state = app_state.read().clone();
     
     rsx! {
+        // Include Tailwind CSS inline
+        style {
+            {include_str!("../../assets/tailwind.css")}
+        }
+        
         div {
-            style: "
-                font-family: Arial, sans-serif;
-                height: 100vh;
-                background-color: #F9FAFB;
-                margin: 0;
-                padding: 0;
-            ",
+            class: "font-sans h-screen bg-gray-50 m-0 p-0",
             TitleBanner {}
             
             div {
-                style: "padding: 0 20px;",
+                class: "px-5",
                 match current_state {
                     AppState::Registration => rsx! {
                         RegistrationScreen {

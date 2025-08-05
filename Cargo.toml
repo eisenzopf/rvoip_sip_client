@@ -31,4 +31,12 @@ cpal = "0.15"
 local-ip-address = "0.6"
 
 [dev-dependencies]
-tokio-test = "0.4" 
+tokio-test = "0.4"
+
+# Optimize for size in release builds
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Enable Link Time Optimization
+codegen-units = 1   # Single codegen unit for better optimization
+strip = true        # Strip symbols from binary
+panic = "abort"     # Smaller panic handler

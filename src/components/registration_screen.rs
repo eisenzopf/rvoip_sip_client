@@ -46,47 +46,38 @@ pub fn RegistrationScreen(
         _ => "Unknown status",
     };
 
-    let (status_color, status_bg) = match &*binding {
-        CallState::Registered => ("#059669", "#F0FDF4"),
-        CallState::Error(_) => ("#DC2626", "#FEF2F2"),
-        CallState::Registering => ("#D97706", "#FFFBEB"),
-        _ => ("#64748B", "#F8FAFC"),
-    };
-
     let is_loading = matches!(&*binding, CallState::Registering);
 
     rsx! {
         div {
-            style: "
-                background: white;
-                border-radius: 12px;
-                padding: 32px;
-                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-                border: 1px solid #E2E8F0;
-            ",
+            class: "bg-white rounded-xl p-8 shadow-sm border border-gray-200",
             
-
             // Status indicator - only show when not idle
             if !matches!(&*binding, CallState::Idle) {
                 div {
-                    style: "margin-bottom: 24px;",
+                    class: "mb-6",
                     
                     div {
-                        style: format!("
-                            display: inline-flex;
-                            align-items: center;
-                            padding: 8px 12px;
-                            background: {};
-                            border-radius: 16px;
-                            border: 1px solid {}30;
-                        ", status_bg, status_color),
+                        class: {
+                            let class_str = match &*binding {
+                                CallState::Registered => "inline-flex items-center px-3 py-2 bg-green-50 rounded-full border border-green-200",
+                                CallState::Error(_) => "inline-flex items-center px-3 py-2 bg-red-50 rounded-full border border-red-200",
+                                CallState::Registering => "inline-flex items-center px-3 py-2 bg-yellow-50 rounded-full border border-yellow-200",
+                                _ => "inline-flex items-center px-3 py-2 bg-gray-50 rounded-full border border-gray-200",
+                            };
+                            class_str
+                        },
                         
                         span {
-                            style: format!("
-                                font-weight: 500;
-                                color: {};
-                                font-size: 0.875rem;
-                            ", status_color),
+                            class: {
+                                let class_str = match &*binding {
+                                    CallState::Registered => "font-medium text-green-700 text-sm",
+                                    CallState::Error(_) => "font-medium text-red-700 text-sm",
+                                    CallState::Registering => "font-medium text-yellow-700 text-sm",
+                                    _ => "font-medium text-gray-700 text-sm",
+                                };
+                                class_str
+                            },
                             "{status_text}"
                         }
                     }
@@ -95,35 +86,20 @@ pub fn RegistrationScreen(
             
             // Form Fields
             div {
-                style: "display: flex; flex-direction: column; gap: 20px; margin-bottom: 32px;",
+                class: "flex flex-col gap-5 mb-8",
                 
                 // Name field (required)
                 div {
                     label {
-                        style: "
-                            display: block;
-                            font-size: 0.875rem;
-                            font-weight: 500;
-                            color: #374151;
-                            margin-bottom: 8px;
-                        ",
+                        class: "block text-sm font-medium text-gray-700 mb-2",
                         span { "Name" }
                         span {
-                            style: "color: #DC2626; margin-left: 4px;",
+                            class: "text-red-600 ml-1",
                             "*"
                         }
                     }
                     input {
-                        style: "
-                            width: 100%;
-                            padding: 12px 16px;
-                            border: 1px solid #D1D5DB;
-                            border-radius: 6px;
-                            font-size: 0.875rem;
-                            background: white;
-                            color: #374151;
-                            box-sizing: border-box;
-                        ",
+                        class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                         r#type: "text",
                         placeholder: "Alice",
                         value: "{username}",
@@ -136,26 +112,11 @@ pub fn RegistrationScreen(
                 // SIP Server field (optional)
                 div {
                     label {
-                        style: "
-                            display: block;
-                            font-size: 0.875rem;
-                            font-weight: 500;
-                            color: #374151;
-                            margin-bottom: 8px;
-                        ",
+                        class: "block text-sm font-medium text-gray-700 mb-2",
                         "SIP Server (optional)"
                     }
                     input {
-                        style: "
-                            width: 100%;
-                            padding: 12px 16px;
-                            border: 1px solid #D1D5DB;
-                            border-radius: 6px;
-                            font-size: 0.875rem;
-                            background: white;
-                            color: #374151;
-                            box-sizing: border-box;
-                        ",
+                        class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                         r#type: "text",
                         placeholder: "sip.example.com",
                         value: "{server_uri}",
@@ -163,11 +124,7 @@ pub fn RegistrationScreen(
                         disabled: is_loading
                     }
                     p {
-                        style: "
-                            font-size: 0.75rem;
-                            color: #6B7280;
-                            margin: 4px 0 0 0;
-                        ",
+                        class: "text-xs text-gray-600 mt-1",
                         if server_uri_value.is_empty() {
                             "Listen for incoming calls only"
                         } else if is_p2p_mode {
@@ -182,26 +139,11 @@ pub fn RegistrationScreen(
                 if !is_p2p_mode && !server_uri_value.is_empty() {
                     div {
                         label {
-                            style: "
-                                display: block;
-                                font-size: 0.875rem;
-                                font-weight: 500;
-                                color: #374151;
-                                margin-bottom: 8px;
-                            ",
+                            class: "block text-sm font-medium text-gray-700 mb-2",
                             "Password"
                         }
                         input {
-                            style: "
-                                width: 100%;
-                                padding: 12px 16px;
-                                border: 1px solid #D1D5DB;
-                                border-radius: 6px;
-                                font-size: 0.875rem;
-                                background: white;
-                                color: #374151;
-                                box-sizing: border-box;
-                            ",
+                            class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                             r#type: "password",
                             placeholder: "Your password",
                             value: "{password}",
@@ -213,33 +155,17 @@ pub fn RegistrationScreen(
                 
                 // Network interface and Port row
                 div {
-                    style: "display: flex; gap: 12px;",
+                    class: "flex gap-3",
                     
                     // Network interface dropdown
                     div {
-                        style: "flex: 2;",
+                        class: "flex-[2]",
                         label {
-                            style: "
-                                display: block;
-                                font-size: 0.875rem;
-                                font-weight: 500;
-                                color: #374151;
-                                margin-bottom: 8px;
-                            ",
+                            class: "block text-sm font-medium text-gray-700 mb-2",
                             "Network Interface"
                         }
                         select {
-                            style: "
-                                width: 100%;
-                                padding: 12px 16px;
-                                border: 1px solid #D1D5DB;
-                                border-radius: 6px;
-                                font-size: 0.875rem;
-                                background: white;
-                                color: #374151;
-                                box-sizing: border-box;
-                                cursor: pointer;
-                            ",
+                            class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                             value: selected_interface.read().as_deref().unwrap_or(""),
                             oninput: move |evt| {
                                 selected_interface.set(Some(evt.value()));
@@ -257,28 +183,13 @@ pub fn RegistrationScreen(
                     
                     // Port field
                     div {
-                        style: "flex: 1;",
+                        class: "flex-1",
                         label {
-                            style: "
-                                display: block;
-                                font-size: 0.875rem;
-                                font-weight: 500;
-                                color: #374151;
-                                margin-bottom: 8px;
-                            ",
+                            class: "block text-sm font-medium text-gray-700 mb-2",
                             "Port"
                         }
                         input {
-                            style: "
-                                width: 100%;
-                                padding: 12px 16px;
-                                border: 1px solid #D1D5DB;
-                                border-radius: 6px;
-                                font-size: 0.875rem;
-                                background: white;
-                                color: #374151;
-                                box-sizing: border-box;
-                            ",
+                            class: "w-full px-4 py-3 border border-gray-300 rounded-md text-sm bg-white text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed",
                             r#type: "number",
                             placeholder: "5070",
                             value: "{port}",
@@ -292,20 +203,16 @@ pub fn RegistrationScreen(
             }
             
             button {
-                style: format!("
-                    width: 100%;
-                    padding: 14px 16px;
-                    background: {};
-                    color: white;
-                    border: none;
-                    border-radius: 6px;
-                    font-size: 0.875rem;
-                    font-weight: 500;
-                    cursor: {};
-                ", 
-                    if is_loading { "#9CA3AF" } else { "#1E293B" },
-                    if is_loading { "not-allowed" } else { "pointer" }
-                ),
+                class: {
+                    let class_str = if is_loading { 
+                        "w-full py-3 px-4 bg-gray-400 text-white rounded-md text-sm font-medium cursor-not-allowed"
+                    } else if username.read().is_empty() {
+                        "w-full py-3 px-4 bg-gray-300 text-gray-500 rounded-md text-sm font-medium cursor-not-allowed"
+                    } else {
+                        "w-full py-3 px-4 bg-slate-800 hover:bg-slate-700 text-white rounded-md text-sm font-medium cursor-pointer transition-colors"
+                    };
+                    class_str
+                },
                 onclick: move |_| if !is_loading && !username.read().is_empty() { on_register.call(()) },
                 disabled: is_loading || username.read().is_empty(),
                 if is_loading { "Connecting..." } else { "Next" }
