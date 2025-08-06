@@ -91,17 +91,26 @@ pub fn CallInterfaceScreen(
         let sip_coroutine = sip_coroutine.clone();
         let is_on_hook = is_on_hook.clone();
         let call_state = call_state.clone();
+        let call_info = call_info.clone();
         move || {
             // Force off-hook during active call states
+            // BUT: Don't do this for incoming ringing calls as they're being answered
             match call_state {
-                Some(CallState::Calling) | 
-                Some(CallState::Ringing) | 
-                Some(CallState::Connected) | 
+                Some(CallState::Calling) |  // Outgoing calls
+                Some(CallState::Connected) | // Active calls
                 Some(CallState::OnHold) | 
                 Some(CallState::Transferring) => {
                     if *is_on_hook.read() {
                         // Send toggle hook command to go off-hook
                         sip_coroutine.send(SipCommand::ToggleHook);
+                    }
+                }
+                Some(CallState::Ringing) => {
+                    // Only auto off-hook for outgoing ringing calls, not incoming
+                    if let Some(ref call) = call_info {
+                        if !call.is_incoming && *is_on_hook.read() {
+                            sip_coroutine.send(SipCommand::ToggleHook);
+                        }
                     }
                 }
                 _ => {

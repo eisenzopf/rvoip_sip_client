@@ -232,7 +232,8 @@ pub fn App() -> Element {
                         is_on_hook.set(hook_state);
                         info!("Hook toggled to: {}", if hook_state { "on hook" } else { "off hook" });
                         
-                        // If going off-hook while there's an incoming call, reject it
+                        // If going off-hook while there's an incoming call that's still ringing (not answered yet), reject it
+                        // This is for rejecting NEW incoming calls when the phone goes off-hook, not for calls being answered
                         if !hook_state && current_call_info.as_ref().map(|c| c.is_incoming && c.state == CallState::Ringing).unwrap_or(false) {
                             if let Some(call_info) = &current_call_info {
                                 let _ = sip_client.hangup(&call_info.id).await;
