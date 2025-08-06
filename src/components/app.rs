@@ -19,7 +19,7 @@ pub fn App() -> Element {
     // State for the SIP client and app flow
     let sip_client = use_signal(|| Arc::new(RwLock::new(SipClientManager::new(SipConfig::default()))));
     let app_state = use_signal(|| AppState::Registration);
-    let registration_state = use_signal(|| CallState::Idle);
+    let mut registration_state = use_signal(|| CallState::Idle);
     let current_call = use_signal(|| None::<CallInfo>);
     let error_message = use_signal(|| None::<String>);
     
@@ -102,6 +102,11 @@ pub fn App() -> Element {
                                         }
                                     }
                                 }
+                                SipClientEvent::RegistrationStatusChanged { status, .. } => {
+                                    info!("UI: Registration status changed to {:?}", status);
+                                    // For now, just set to Idle for any registration status
+                                    registration_state.set(CallState::Idle);
+                                }
                                 _ => {}
                             }
                             last_event.set(Some(event));
@@ -113,34 +118,9 @@ pub fn App() -> Element {
         }
     });
     
-    // Watch for call state changes
-    use_effect({
-        let sip_client_clone = sip_client.read().clone();
-        let mut current_call = current_call.clone();
-        let mut registration_state = registration_state.clone();
-        move || {
-            let sip_client_clone = sip_client_clone.clone();
-            spawn(async move {
-                loop {
-                    // Update current call state
-                    if let Some(call) = sip_client_clone.read().await.get_current_call().await {
-                        if current_call.read().as_ref().map(|c| &c.state) != Some(&call.state) {
-                            info!("App: Updating UI call state to {:?}", call.state);
-                        }
-                        current_call.set(Some(call));
-                    } else {
-                        current_call.set(None);
-                    }
-                    
-                    // Update registration state
-                    let reg_state = sip_client_clone.read().await.get_registration_state().await;
-                    registration_state.set(reg_state);
-                    
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                }
-            });
-        }
-    });
+    // REMOVED: Polling loop that was causing deadlock
+    // The event handler above already updates current_call and registration_state
+    // through the SipClientEvent messages
     
     // Register button handler
     let on_register = {
