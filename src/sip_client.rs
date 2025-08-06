@@ -3,6 +3,7 @@ use log::{info, error};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc};
+use uuid::Uuid;
 
 // Import rvoip sip-client types
 use rvoip::sip_client::{SipClient, SipClientBuilder, SipClientEvent, AudioDirection, CallId, CallState as SipCallState};
@@ -380,7 +381,14 @@ impl SipClientManager {
             
             if let Some(client) = &self.client {
                 // Parse the call ID back to CallId type
-                match CallId::parse_str(&call_info.id) {
+                // Try to parse the call ID - it might be a UUID string
+                let call_id_result = if let Ok(uuid) = Uuid::parse_str(&call_info.id) {
+                    CallId::parse_str(&uuid.to_string())
+                } else {
+                    CallId::parse_str(&call_info.id)
+                };
+                
+                match call_id_result {
                     Ok(call_id) => {
                         info!("Parsed call ID successfully for hangup");
                         match client.hangup(&call_id).await {
@@ -416,31 +424,43 @@ impl SipClientManager {
                 
                 if let Some(client) = &self.client {
                     // Parse the call ID back to CallId type
-                    if let Ok(call_id) = CallId::parse_str(&call_info.id) {
-                        match client.answer(&call_id).await {
-                            Ok(_) => {
-                                info!("Answer call succeeded, updating state...");
-                                // Update call state to connected
-                                let mut current_call_guard = self.current_call.write().await;
-                                if let Some(call) = current_call_guard.as_mut() {
-                                    info!("Manually updating call state from {:?} to Connected after answering", call.state);
-                                    call.state = CallState::Connected;
-                                    call.connected_at = Some(chrono::Utc::now());
-                                    info!("Call state after manual update: {:?}", call.state);
-                                } else {
-                                    error!("Current call is None after answering!");
-                                }
-                                drop(current_call_guard);
-                                Ok(())
-                            }
-                            Err(e) => {
-                                let error_msg = format!("Answer call failed: {}", e);
-                                error!("{}", error_msg);
-                                Err(e.into())
-                            }
-                        }
+                    // Try to parse the call ID - it might be a UUID string
+                    let call_id_result = if let Ok(uuid) = Uuid::parse_str(&call_info.id) {
+                        CallId::parse_str(&uuid.to_string())
                     } else {
-                        Err(anyhow::anyhow!("Invalid call ID format"))
+                        CallId::parse_str(&call_info.id)
+                    };
+                    
+                    match call_id_result {
+                        Ok(call_id) => {
+                            info!("Successfully parsed call ID for answer: {}", call_info.id);
+                                match client.answer(&call_id).await {
+                                    Ok(_) => {
+                                        info!("Answer call succeeded, updating state...");
+                                        // Update call state to connected
+                                        let mut current_call_guard = self.current_call.write().await;
+                                        if let Some(call) = current_call_guard.as_mut() {
+                                            info!("Manually updating call state from {:?} to Connected after answering", call.state);
+                                            call.state = CallState::Connected;
+                                            call.connected_at = Some(chrono::Utc::now());
+                                            info!("Call state after manual update: {:?}", call.state);
+                                        } else {
+                                            error!("Current call is None after answering!");
+                                        }
+                                        drop(current_call_guard);
+                                        Ok(())
+                                    }
+                                    Err(e) => {
+                                        let error_msg = format!("Answer call failed: {}", e);
+                                        error!("{}", error_msg);
+                                        Err(e.into())
+                                    }
+                                }
+                            }
+                        Err(e) => {
+                            error!("Failed to parse call ID '{}' for answer: {}", call_info.id, e);
+                            Err(anyhow::anyhow!("Invalid call ID format: {}", e))
+                        }
                     }
                 } else {
                     Err(anyhow::anyhow!("Client not initialized"))
@@ -525,7 +545,16 @@ impl SipClientManager {
             info!("Found current call: {}", call_info.id);
             if let Some(client) = &self.client {
                 info!("Client is available");
-                match CallId::parse_str(&call_info.id) {
+                // Try to parse the call ID - it might be a UUID string
+                let call_id_result = if let Ok(uuid) = Uuid::parse_str(&call_info.id) {
+                    // Try creating CallId from UUID
+                    CallId::parse_str(&uuid.to_string())
+                } else {
+                    // Try parsing directly
+                    CallId::parse_str(&call_info.id)
+                };
+                
+                match call_id_result {
                     Ok(call_id) => {
                         info!("Parsed call ID successfully from string: {}", call_info.id);
                         let current_state = client.is_muted(&call_id).await?;
@@ -579,15 +608,25 @@ impl SipClientManager {
             info!("Found current call: {}", call_info.id);
             if let Some(client) = &self.client {
                 info!("Client is available");
-                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
-                    info!("Parsed call ID successfully, calling client.hold");
-                    client.hold(&call_id).await?;
-                    info!("Call put on hold successfully");
-                    // State will be updated by event handler
-                    Ok(())
+                // Try to parse the call ID - it might be a UUID string
+                let call_id_result = if let Ok(uuid) = Uuid::parse_str(&call_info.id) {
+                    CallId::parse_str(&uuid.to_string())
                 } else {
-                    error!("Failed to parse call ID: {}", call_info.id);
-                    Err(anyhow::anyhow!("Invalid call ID format"))
+                    CallId::parse_str(&call_info.id)
+                };
+                
+                match call_id_result {
+                    Ok(call_id) => {
+                        info!("Parsed call ID successfully, calling client.hold");
+                        client.hold(&call_id).await?;
+                        info!("Call put on hold successfully");
+                        // State will be updated by event handler
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("Failed to parse call ID '{}': {}", call_info.id, e);
+                        Err(anyhow::anyhow!("Invalid call ID format: {}", e))
+                    }
                 }
             } else {
                 error!("Client not initialized");
@@ -606,15 +645,25 @@ impl SipClientManager {
             info!("Found current call: {}", call_info.id);
             if let Some(client) = &self.client {
                 info!("Client is available");
-                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
-                    info!("Parsed call ID successfully, calling client.resume");
-                    client.resume(&call_id).await?;
-                    info!("Call resumed successfully");
-                    // State will be updated by event handler
-                    Ok(())
+                // Try to parse the call ID - it might be a UUID string
+                let call_id_result = if let Ok(uuid) = Uuid::parse_str(&call_info.id) {
+                    CallId::parse_str(&uuid.to_string())
                 } else {
-                    error!("Failed to parse call ID: {}", call_info.id);
-                    Err(anyhow::anyhow!("Invalid call ID format"))
+                    CallId::parse_str(&call_info.id)
+                };
+                
+                match call_id_result {
+                    Ok(call_id) => {
+                        info!("Parsed call ID successfully, calling client.resume");
+                        client.resume(&call_id).await?;
+                        info!("Call resumed successfully");
+                        // State will be updated by event handler
+                        Ok(())
+                    }
+                    Err(e) => {
+                        error!("Failed to parse call ID '{}': {}", call_info.id, e);
+                        Err(anyhow::anyhow!("Invalid call ID format: {}", e))
+                    }
                 }
             } else {
                 error!("Client not initialized");
