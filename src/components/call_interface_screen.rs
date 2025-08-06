@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
-use std::sync::Arc;
-use crate::sip_client::{CallInfo, SipClientManager, CallState};
+use crate::sip_client::{CallInfo, CallState};
+use crate::commands::SipCommand;
 use crate::components::{UserInfoBar, CallStatus, CallControls, HookStatus};
 use crate::components::call_control_state::CallControlState;
 
@@ -8,49 +8,28 @@ use crate::components::call_control_state::CallControlState;
 pub fn CallInterfaceScreen(
     username: String,
     server_uri: String,
+    sip_coroutine: Coroutine<SipCommand>,
     mut call_target: Signal<String>,
     current_call: Signal<Option<CallInfo>>,
-    sip_client: Signal<Arc<tokio::sync::RwLock<SipClientManager>>>,
+    is_on_hook: Signal<bool>,
     on_make_call: EventHandler<()>,
     on_hangup_call: EventHandler<()>,
     on_logout: EventHandler<()>
 ) -> Element {
     // Determine connection mode from the actual SipClientManager config
     let is_p2p_mode = server_uri.contains('@');
-    let is_receiver_mode = use_signal(|| false);
+    let mut is_receiver_mode = use_signal(|| false);
     
     // Get listening address for receiver mode
-    let listening_address = use_signal(|| "Loading...".to_string());
+    let mut listening_address = use_signal(|| "Loading...".to_string());
     
-    // Track hook state
-    let is_on_hook = use_signal(|| true);
+    // Check if in receiver mode based on server_uri
+    is_receiver_mode.set(server_uri.is_empty());
     
-    // Fetch the actual connection mode, listening address, and hook state on mount (only once)
-    use_effect({
-        let sip_client = sip_client.clone();
-        let mut listening_address = listening_address.clone();
-        let mut is_receiver_mode = is_receiver_mode.clone();
-        let mut is_on_hook = is_on_hook.clone();
-        move || {
-            spawn(async move {
-                let sip_guard = sip_client.read();
-                let guard = sip_guard.read().await;
-                
-                // Check if we're actually in receiver mode
-                is_receiver_mode.set(guard.is_receiver_mode());
-                
-                // Get current hook state only once on mount
-                is_on_hook.set(guard.is_on_hook().await);
-                
-                // Get listening address if in receiver mode
-                if let Some(addr) = guard.get_listening_address() {
-                    listening_address.set(addr);
-                } else if guard.is_receiver_mode() {
-                    listening_address.set("Not available".to_string());
-                }
-            });
-        }
-    });
+    // Set listening address for receiver mode
+    if *is_receiver_mode.read() {
+        listening_address.set(format!("{}@localhost:5060", username));
+    }
     
     // Timer to update call duration every second
     use_effect(move || {
@@ -94,13 +73,17 @@ pub fn CallInterfaceScreen(
     let call_state = call_info.as_ref().map(|c| c.state.clone());
     let is_muted = call_info.as_ref().and_then(|c| c.is_muted).unwrap_or(false);
     
+    // Debug logging
+    log::info!("CallInterfaceScreen: call_info = {:?}", call_info);
+    log::info!("CallInterfaceScreen: call_state = {:?}", call_state);
+    
     // Get the control state to determine desired hook state
-    let control_state = CallControlState::from_call_state(call_state.as_ref(), is_muted);
+    let _control_state = CallControlState::from_call_state(call_state.as_ref(), is_muted);
     
     // Automatically set hook state to off during active calls
     use_effect({
-        let sip_client = sip_client.clone();
-        let mut is_on_hook = is_on_hook.clone();
+        let sip_coroutine = sip_coroutine.clone();
+        let is_on_hook = is_on_hook.clone();
         let call_state = call_state.clone();
         move || {
             // Force off-hook during active call states
@@ -111,13 +94,8 @@ pub fn CallInterfaceScreen(
                 Some(CallState::OnHold) | 
                 Some(CallState::Transferring) => {
                     if *is_on_hook.read() {
-                        spawn(async move {
-                            let sip_guard = sip_client.read();
-                            let guard = sip_guard.read().await;
-                            if let Ok(_) = guard.set_hook_state(false).await {
-                                is_on_hook.set(false);
-                            }
-                        });
+                        // Send toggle hook command to go off-hook
+                        sip_coroutine.send(SipCommand::ToggleHook);
                     }
                 }
                 _ => {
@@ -171,62 +149,31 @@ pub fn CallInterfaceScreen(
                     on_make_call: move |_| on_make_call.call(()),
                     on_mute_toggle: move |_| {
                         log::info!("Mute button clicked");
-                        let sip_client = sip_client.clone();
-                        spawn(async move {
-                            log::info!("Mute spawn started");
-                            let sip_guard = sip_client.read();
-                            log::info!("Got client Arc");
-                            let mut client = sip_guard.write().await;
-                            log::info!("Got write guard");
-                            match client.toggle_mute().await {
-                                Ok(is_muted) => log::info!("Toggled mute to: {}", is_muted),
-                                Err(e) => log::error!("Failed to toggle mute: {}", e),
-                            }
-                            log::info!("Mute operation complete");
-                        });
+                        sip_coroutine.send(SipCommand::ToggleMute);
                     },
                     on_hold_toggle: move |_| {
                         log::info!("Hold button clicked");
-                        let sip_client = sip_client.clone();
-                        spawn(async move {
-                            log::info!("Hold spawn started");
-                            let sip_guard = sip_client.read();
-                            log::info!("Got client Arc for hold");
-                            let mut client = sip_guard.write().await;
-                            log::info!("Got write guard for hold");
-                            
-                            // Check if on hold
-                            if client.is_on_hold().await {
-                                log::info!("Call is on hold, resuming...");
-                                match client.resume().await {
-                                    Ok(_) => log::info!("Resumed call"),
-                                    Err(e) => log::error!("Failed to resume: {}", e),
-                                }
+                        // Check current call state to determine if we should hold or resume
+                        if let Some(call) = current_call.read().as_ref() {
+                            if matches!(call.state, CallState::OnHold) {
+                                log::info!("Call is on hold, sending resume command");
+                                sip_coroutine.send(SipCommand::Resume);
                             } else {
-                                log::info!("Call is active, putting on hold...");
-                                match client.hold().await {
-                                    Ok(_) => log::info!("Put call on hold"),
-                                    Err(e) => log::error!("Failed to hold: {}", e),
-                                }
+                                log::info!("Call is active, sending hold command");
+                                sip_coroutine.send(SipCommand::Hold);
                             }
-                            log::info!("Hold operation complete");
-                        });
+                        }
                     },
                     on_transfer: move |_| {
                         // TODO: Open transfer dialog
                         log::info!("Transfer button clicked");
+                        // For now, just log. In a real implementation, you'd show a dialog
+                        // to get the transfer target, then send:
+                        // sip_coroutine.send(SipCommand::Transfer { target: transfer_target });
                     },
                     on_hook_toggle: move |_| {
-                        let sip_client = sip_client.clone();
-                        let mut is_on_hook = is_on_hook.clone();
-                        spawn(async move {
-                            let sip_guard = sip_client.read();
-                            let mut client = sip_guard.write().await;
-                            if let Ok(new_state) = client.toggle_hook().await {
-                                log::info!("Hook toggled to: {}", if new_state { "on hook" } else { "off hook" });
-                                is_on_hook.set(new_state);
-                            }
-                        });
+                        log::info!("Hook toggle button clicked");
+                        sip_coroutine.send(SipCommand::ToggleHook);
                     },
                     on_end_call: move |_| on_hangup_call.call(())
                     }

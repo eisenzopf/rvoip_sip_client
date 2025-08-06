@@ -1,12 +1,11 @@
 use dioxus::prelude::*;
 use log::{error, info};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-
+use futures_util::StreamExt;
 use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig, ConnectionMode};
-use crate::event_channel::EventChannel;
+use crate::commands::SipCommand;
 use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen};
 use rvoip::sip_client::{SipClientEvent, CallState as SipCallState};
+use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq)]
 enum AppState {
@@ -17,11 +16,11 @@ enum AppState {
 
 pub fn App() -> Element {
     // State for the SIP client and app flow
-    let sip_client = use_signal(|| Arc::new(RwLock::new(SipClientManager::new(SipConfig::default()))));
     let app_state = use_signal(|| AppState::Registration);
     let mut registration_state = use_signal(|| CallState::Idle);
     let current_call = use_signal(|| None::<CallInfo>);
     let error_message = use_signal(|| None::<String>);
+    let is_on_hook = use_signal(|| true);  // Track hook state in UI
     
     // Form fields
     let username = use_signal(|| "".to_string());
@@ -39,289 +38,383 @@ pub fn App() -> Element {
     });
     let port = use_signal(|| "5060".to_string());
     
-    // Create event channel
-    let event_channel = use_signal(|| Arc::new(RwLock::new(EventChannel::new())));
+    // Create event channel - will be created inside coroutine
     let last_event = use_signal(|| None::<SipClientEvent>);
     
-    // Watch for events from the SIP client
-    use_effect({
-        let event_channel = event_channel.clone();
-        let mut app_state = app_state.clone();
-        let mut last_event = last_event.clone();
+    // Create the SIP coroutine that owns the SipClientManager
+    // This coroutine processes commands and manages all SIP state
+    let sip_coroutine = use_coroutine({
         let mut current_call = current_call.clone();
-        move || {
-            spawn(async move {
-                loop {
-                    if let Ok(channel_guard) = event_channel.read().try_write() {
-                        let mut channel = channel_guard;
-                        if let Ok(event) = channel.receiver.try_recv() {
-                            // Handle specific events
-                            match &event {
-                                SipClientEvent::IncomingCall { from, .. } => {
-                                    info!("Incoming call from: {}", from);
-                                    app_state.set(AppState::IncomingCall { caller_id: from.clone() });
-                                }
-                                SipClientEvent::CallStateChanged { call, new_state, .. } => {
-                                    info!("UI: Received CallStateChanged event, state: {:?}", new_state);
-                                    // Update the UI's current call state immediately
-                                    let should_update = current_call.read().as_ref()
-                                        .map(|info| info.id == call.id.to_string())
-                                        .unwrap_or(false);
-                                    
-                                    if should_update {
-                                        let mut current_call_info = current_call.read().clone().unwrap();
-                                        current_call_info.state = CallState::from(new_state.clone());
-                                        if *new_state == SipCallState::Connected && current_call_info.connected_at.is_none() {
-                                            current_call_info.connected_at = Some(chrono::Utc::now());
-                                        }
-                                        info!("UI: Updated call state to {:?}", current_call_info.state);
-                                        current_call.set(Some(current_call_info));
-                                    }
-                                }
-                                SipClientEvent::CallOnHold { call } => {
-                                    info!("UI: Call put on hold");
-                                    if let Some(info) = current_call.write().as_mut() {
-                                        if info.id == call.id.to_string() {
-                                            info.state = CallState::OnHold;
-                                        }
-                                    }
-                                }
-                                SipClientEvent::CallResumed { call } => {
-                                    info!("UI: Call resumed");
-                                    if let Some(info) = current_call.write().as_mut() {
-                                        if info.id == call.id.to_string() {
-                                            info.state = CallState::Connected;
-                                        }
-                                    }
-                                }
-                                SipClientEvent::CallTransferred { call, target } => {
-                                    info!("UI: Call transferred to {}", target);
-                                    if let Some(info) = current_call.write().as_mut() {
-                                        if info.id == call.id.to_string() {
-                                            info.state = CallState::Transferring;
-                                        }
-                                    }
-                                }
-                                SipClientEvent::RegistrationStatusChanged { status, .. } => {
-                                    info!("UI: Registration status changed to {:?}", status);
-                                    // For now, just set to Idle for any registration status
-                                    registration_state.set(CallState::Idle);
-                                }
-                                _ => {}
+        let mut registration_state = registration_state.clone();
+        let mut is_on_hook = is_on_hook.clone();
+        let mut error_message = error_message.clone();
+        let mut app_state = app_state.clone();
+        
+        move |mut rx: UnboundedReceiver<SipCommand>| async move {
+            // The coroutine owns the SipClientManager
+            let mut sip_client = SipClientManager::new(SipConfig::default());
+            let mut current_call_info: Option<CallInfo> = None;
+            let mut hook_state = true; // Start on-hook
+            
+            // Create event channel for this coroutine
+            let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<SipClientEvent>();
+            
+            // Process both commands and events
+            loop {
+                tokio::select! {
+                    // Process commands from UI
+                    Some(command) = rx.next() => {
+                info!("SIP Coroutine: Processing command {:?}", command);
+                
+                match command {
+                    SipCommand::Initialize { username, password, server_uri, local_ip, local_port } => {
+                        // Update configuration
+                        let connection_mode = if server_uri.is_empty() {
+                            ConnectionMode::Receiver
+                        } else if server_uri.contains('@') {
+                            ConnectionMode::PeerToPeer {
+                                target_uri: server_uri.clone(),
                             }
-                            last_event.set(Some(event));
+                        } else {
+                            ConnectionMode::Server {
+                                server_uri: server_uri.clone(),
+                                username: username.clone(),
+                                password: password.clone(),
+                            }
+                        };
+                        
+                        let config = SipConfig {
+                            display_name: username.clone(),
+                            connection_mode,
+                            local_port,
+                            local_ip,
+                        };
+                        
+                        sip_client.update_config(config);
+                        
+                        // Initialize the client
+                        match sip_client.initialize().await {
+                            Ok(_) => {
+                                info!("Client initialized successfully");
+                                
+                                // Set up event sender
+                                sip_client.set_event_sender(event_sender.clone());
+                                
+                                // Start event loop
+                                match sip_client.start_event_loop().await {
+                                    Ok(_) => {
+                                        info!("Event loop started");
+                                        app_state.set(AppState::CallInterface);
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to start event loop: {}", e);
+                                        error_message.set(Some(format!("Failed to start: {}", e)));
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to initialize client: {}", e);
+                                error_message.set(Some(format!("Failed to initialize: {}", e)));
+                            }
                         }
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    
+                    SipCommand::MakeCall { target } => {
+                        match sip_client.make_call(&target).await {
+                            Ok(call_id) => {
+                                info!("Call initiated with ID: {}", call_id);
+                                // Create call info for outgoing call
+                                let call_info = CallInfo {
+                                    id: call_id.clone(),
+                                    remote_uri: target,
+                                    state: CallState::Calling,
+                                    duration: None,
+                                    is_incoming: false,
+                                    connected_at: None,
+                                    is_muted: Some(false),
+                                };
+                                current_call_info = Some(call_info.clone());
+                                current_call.set(Some(call_info));
+                            }
+                            Err(e) => {
+                                error!("Failed to make call: {}", e);
+                                error_message.set(Some(format!("Failed to make call: {}", e)));
+                            }
+                        }
+                    }
+                    
+                    SipCommand::Hangup => {
+                        if let Some(call_info) = &current_call_info {
+                            match sip_client.hangup(&call_info.id).await {
+                                Ok(_) => {
+                                    info!("Call ended");
+                                    current_call_info = None;
+                                    current_call.set(None);
+                                }
+                                Err(e) => {
+                                    error!("Failed to hangup: {}", e);
+                                    error_message.set(Some(format!("Failed to hangup: {}", e)));
+                                }
+                            }
+                        }
+                    }
+                    
+                    SipCommand::AnswerCall => {
+                        if let Some(call_info) = &current_call_info {
+                            if call_info.is_incoming {
+                                match sip_client.answer_call(&call_info.id).await {
+                                    Ok(_) => {
+                                        info!("Call answered");
+                                        // Update state will come through events
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to answer call: {}", e);
+                                        error_message.set(Some(format!("Failed to answer: {}", e)));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    SipCommand::ToggleMute => {
+                        if let Some(call_info) = &current_call_info {
+                            match sip_client.toggle_mute(&call_info.id).await {
+                                Ok(is_muted) => {
+                                    info!("Toggled mute to: {}", is_muted);
+                                    if let Some(ref mut info) = current_call_info {
+                                        info.is_muted = Some(is_muted);
+                                    }
+                                    current_call.set(current_call_info.clone());
+                                }
+                                Err(e) => {
+                                    error!("Failed to toggle mute: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    
+                    SipCommand::Hold => {
+                        if let Some(call_info) = &current_call_info {
+                            match sip_client.hold(&call_info.id).await {
+                                Ok(_) => {
+                                    info!("Call put on hold");
+                                    if let Some(ref mut info) = current_call_info {
+                                        info.state = CallState::OnHold;
+                                    }
+                                    current_call.set(current_call_info.clone());
+                                }
+                                Err(e) => {
+                                    error!("Failed to hold: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    
+                    SipCommand::Resume => {
+                        if let Some(call_info) = &current_call_info {
+                            match sip_client.resume(&call_info.id).await {
+                                Ok(_) => {
+                                    info!("Call resumed");
+                                    if let Some(ref mut info) = current_call_info {
+                                        info.state = CallState::Connected;
+                                    }
+                                    current_call.set(current_call_info.clone());
+                                }
+                                Err(e) => {
+                                    error!("Failed to resume: {}", e);
+                                }
+                            }
+                        }
+                    }
+                    
+                    SipCommand::ToggleHook => {
+                        hook_state = !hook_state;
+                        is_on_hook.set(hook_state);
+                        info!("Hook toggled to: {}", if hook_state { "on hook" } else { "off hook" });
+                        
+                        // If going off-hook while there's an incoming call, reject it
+                        if !hook_state && current_call_info.as_ref().map(|c| c.is_incoming && c.state == CallState::Ringing).unwrap_or(false) {
+                            if let Some(call_info) = &current_call_info {
+                                let _ = sip_client.hangup(&call_info.id).await;
+                                current_call_info = None;
+                                current_call.set(None);
+                            }
+                        }
+                    }
+                    
+                    _ => {
+                        info!("Command not implemented yet: {:?}", command);
+                    }
                 }
-            });
+                    }
+                    
+                    // Process events from SIP client
+                    Some(event) = event_receiver.recv() => {
+                        info!("Coroutine: Processing event {:?}", event);
+                        
+                        match &event {
+                            SipClientEvent::IncomingCall { from, call, .. } => {
+                                // Check if we're on hook (able to receive calls)
+                                if hook_state {
+                                    let call_info = CallInfo {
+                                        id: call.id.to_string(),
+                                        remote_uri: from.clone(),
+                                        state: CallState::Ringing,
+                                        duration: None,
+                                        is_incoming: true,
+                                        connected_at: None,
+                                        is_muted: Some(false),
+                                    };
+                                    current_call_info = Some(call_info.clone());
+                                    current_call.set(Some(call_info));
+                                    app_state.set(AppState::IncomingCall { caller_id: from.clone() });
+                                } else {
+                                    // We're off hook, reject the incoming call
+                                    info!("Rejecting incoming call - phone is off hook");
+                                    let _ = sip_client.hangup(&call.id.to_string()).await;
+                                }
+                            }
+                            
+                            SipClientEvent::CallStateChanged { call, new_state, .. } => {
+                                if let Some(ref mut call_info) = current_call_info {
+                                    if call_info.id == call.id.to_string() {
+                                        call_info.state = CallState::from(new_state.clone());
+                                        if new_state == &SipCallState::Connected && call_info.connected_at.is_none() {
+                                            call_info.connected_at = Some(chrono::Utc::now());
+                                        }
+                                        current_call.set(Some(call_info.clone()));
+                                    }
+                                }
+                            }
+                            
+                            SipClientEvent::CallEnded { call } => {
+                                if current_call_info.as_ref().map(|c| c.id == call.id.to_string()).unwrap_or(false) {
+                                    current_call_info = None;
+                                    current_call.set(None);
+                                }
+                            }
+                            
+                            SipClientEvent::CallOnHold { call } => {
+                                if let Some(ref mut call_info) = current_call_info {
+                                    if call_info.id == call.id.to_string() {
+                                        call_info.state = CallState::OnHold;
+                                        current_call.set(Some(call_info.clone()));
+                                    }
+                                }
+                            }
+                            
+                            SipClientEvent::CallResumed { call } => {
+                                if let Some(ref mut call_info) = current_call_info {
+                                    if call_info.id == call.id.to_string() {
+                                        call_info.state = CallState::Connected;
+                                        current_call.set(Some(call_info.clone()));
+                                    }
+                                }
+                            }
+                            
+                            SipClientEvent::RegistrationStatusChanged { status, .. } => {
+                                // Update registration state
+                                registration_state.set(CallState::Idle);
+                            }
+                            
+                            _ => {
+                                info!("Unhandled event in coroutine: {:?}", event);
+                            }
+                        }
+                    }
+                }
+            }
         }
     });
     
-    // REMOVED: Polling loop that was causing deadlock
-    // The event handler above already updates current_call and registration_state
-    // through the SipClientEvent messages
+    // Note: Event processing is now handled by the coroutine above
+    // This avoids duplicate processing and ensures all state is managed in one place
     
     // Register button handler
     let on_register = {
-        let sip_client = sip_client.clone();
-        let event_channel = event_channel.clone();
+        let sip_coroutine = sip_coroutine.clone();
         let username = username.clone();
         let password = password.clone();
         let server_uri = server_uri.clone();
         let selected_interface = selected_interface.clone();
         let port = port.clone();
-        let app_state = app_state.clone();
-        let error_message = error_message.clone();
         
         move |_| {
-            let sip_client = sip_client.clone();
-            let event_channel = event_channel.clone();
-            let username = username.read().clone();
-            let password = password.read().clone();
-            let server_uri = server_uri.read().clone();
-            let selected_interface = selected_interface.read().clone();
-            let port = port.read().clone();
-            let mut app_state = app_state.clone();
-            let mut error_message = error_message.clone();
+            info!("Starting connection process...");
             
-            spawn(async move {
-                info!("Starting connection process...");
-                
-                // Determine connection mode based on URI content
-                let connection_mode = if server_uri.is_empty() {
-                    // Receiver mode - just listening
-                    ConnectionMode::Receiver
-                } else if server_uri.contains('@') {
-                    // P2P mode
-                    ConnectionMode::PeerToPeer {
-                        target_uri: server_uri.clone(),
-                    }
-                } else {
-                    // Server mode
-                    ConnectionMode::Server {
-                        server_uri: server_uri.clone(),
-                        username: username.clone(),
-                        password: password.clone(),
-                    }
-                };
-                
-                // Update configuration
-                let port_num = port.parse::<u16>().unwrap_or(5060);
-                let config = SipConfig {
-                    display_name: username.clone(),
-                    connection_mode,
-                    local_port: port_num,
-                    local_ip: selected_interface.clone(),
-                };
-                
-                {
-                    let sip_guard = sip_client.read();
-                    let mut client = sip_guard.write().await;
-                    client.update_config(config);
-                    
-                    // Initialize the client
-                    match client.initialize().await {
-                        Ok(_) => {
-                            info!("Client initialized successfully");
-                            
-                            // Set up event sender
-                            let channel_guard = event_channel.read();
-                            let channel = channel_guard.read().await;
-                            client.set_event_sender(channel.sender.clone());
-                            drop(channel);
-                            
-                            // Start event loop
-                            match client.start_event_loop().await {
-                                Ok(_) => {
-                                    info!("Event loop started");
-                                    
-                                    // Registration happens automatically
-                                    info!("Registration in progress...");
-                                    app_state.set(AppState::CallInterface);
-                                }
-                                Err(e) => {
-                                    error!("Failed to start event loop: {}", e);
-                                    error_message.set(Some(format!("Failed to start event loop: {}", e)));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to initialize client: {}", e);
-                            error_message.set(Some(format!("Failed to initialize client: {}", e)));
-                        }
-                    }
-                }
+            let username_val = username.read().clone();
+            let password_val = password.read().clone();
+            let server_uri_val = server_uri.read().clone();
+            let selected_interface_val = selected_interface.read().clone();
+            let port_val = port.read().clone();
+            let port_num = port_val.parse::<u16>().unwrap_or(5060);
+            
+            // Send initialize command to coroutine
+            sip_coroutine.send(SipCommand::Initialize {
+                username: username_val,
+                password: password_val,
+                server_uri: server_uri_val,
+                local_ip: selected_interface_val,
+                local_port: port_num,
             });
         }
     };
     
     // Make call handler
     let on_make_call = {
-        let sip_client = sip_client.clone();
+        let sip_coroutine = sip_coroutine.clone();
         let call_target = call_target.clone();
-        let error_message = error_message.clone();
         
         move |_| {
-            let sip_client = sip_client.clone();
             let target = call_target.read().clone();
-            let mut error_message = error_message.clone();
+            info!("Making call to: {}", target);
             
-            spawn(async move {
-                info!("Making call to: {}", target);
-                
-                let sip_guard = sip_client.read();
-                let mut client = sip_guard.write().await;
-                match client.make_call(&target).await {
-                    Ok(call_id) => {
-                        info!("Call initiated with ID: {}", call_id);
-                    }
-                    Err(e) => {
-                        error!("Failed to make call: {}", e);
-                        error_message.set(Some(format!("Failed to make call: {}", e)));
-                    }
-                }
-            });
+            // Send make call command to coroutine
+            sip_coroutine.send(SipCommand::MakeCall { target });
         }
     };
     
     // Hangup handler
     let on_hangup = {
-        let sip_client = sip_client.clone();
-        let error_message = error_message.clone();
+        let sip_coroutine = sip_coroutine.clone();
         
         move |_| {
-            let sip_client = sip_client.clone();
-            let mut error_message = error_message.clone();
+            info!("Hanging up call");
             
-            spawn(async move {
-                info!("Hanging up call");
-                
-                let sip_guard = sip_client.read();
-                let mut client = sip_guard.write().await;
-                match client.hangup().await {
-                    Ok(_) => {
-                        info!("Call ended");
-                    }
-                    Err(e) => {
-                        error!("Failed to hangup: {}", e);
-                        error_message.set(Some(format!("Failed to hangup: {}", e)));
-                    }
-                }
-            });
+            // Send hangup command to coroutine
+            sip_coroutine.send(SipCommand::Hangup);
         }
     };
     
     // Answer incoming call handler
     let on_answer_call = {
-        let sip_client = sip_client.clone();
+        let sip_coroutine = sip_coroutine.clone();
         let mut app_state = app_state.clone();
-        let error_message = error_message.clone();
         
         move |_| {
             // Immediately return to call interface screen
             app_state.set(AppState::CallInterface);
             
-            let sip_client = sip_client.clone();
-            let mut error_message = error_message.clone();
+            info!("Answering incoming call");
             
-            spawn(async move {
-                info!("Answering incoming call");
-                
-                let sip_guard = sip_client.read();
-                let mut client = sip_guard.write().await;
-                match client.answer_call().await {
-                    Ok(_) => {
-                        info!("Call answered");
-                    }
-                    Err(e) => {
-                        error!("Failed to answer call: {}", e);
-                        error_message.set(Some(format!("Failed to answer call: {}", e)));
-                    }
-                }
-            });
+            // Send answer command to coroutine
+            sip_coroutine.send(SipCommand::AnswerCall);
         }
     };
     
     // Reject incoming call handler
     let on_reject_call = {
-        let sip_client = sip_client.clone();
+        let sip_coroutine = sip_coroutine.clone();
         let mut app_state = app_state.clone();
         
         move |_| {
             // Immediately return to call interface screen
             app_state.set(AppState::CallInterface);
             
-            let sip_client = sip_client.clone();
+            info!("Rejecting incoming call");
             
-            spawn(async move {
-                info!("Rejecting incoming call");
-                
-                // Hangup to reject
-                let sip_guard = sip_client.read();
-                let mut client = sip_guard.write().await;
-                let _ = client.hangup().await;
-            });
+            // Send hangup command to reject
+            sip_coroutine.send(SipCommand::Hangup);
         }
     };
     
@@ -374,9 +467,10 @@ pub fn App() -> Element {
                         CallInterfaceScreen {
                             username: username.read().clone(),
                             server_uri: server_uri.read().clone(),
-                            sip_client: sip_client.clone(),
+                            sip_coroutine: sip_coroutine.clone(),
                             call_target: call_target.clone(),
                             current_call: current_call.clone(),
+                            is_on_hook: is_on_hook.clone(),
                             on_make_call: on_make_call,
                             on_hangup_call: on_hangup,
                             on_logout: on_logout,

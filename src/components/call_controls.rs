@@ -21,6 +21,11 @@ pub fn CallControls(
     // Get the control state based on current call state
     let control_state = CallControlState::from_call_state(call_state.as_ref(), is_muted);
     
+    // Debug logging
+    log::info!("CallControls: call_state = {:?}, is_muted = {}", call_state, is_muted);
+    log::info!("CallControls: control_state.mute_enabled = {}, hold_enabled = {}, end_call_visible = {}", 
+        control_state.mute_enabled, control_state.hold_enabled, control_state.end_call_visible);
+    
     // Determine placeholder text
     let placeholder = if is_receiver_mode {
         "Enter SIP URI (e.g., alice@192.168.1.100)"

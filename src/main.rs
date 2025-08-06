@@ -4,6 +4,7 @@ mod sip_client;
 mod components;
 mod event_channel;
 mod network_utils;
+mod commands;
 
 use components::App;
 
