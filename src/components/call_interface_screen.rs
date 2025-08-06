@@ -8,6 +8,8 @@ use crate::components::call_control_state::CallControlState;
 pub fn CallInterfaceScreen(
     username: String,
     server_uri: String,
+    selected_interface: Option<String>,
+    port: String,
     sip_coroutine: Coroutine<SipCommand>,
     mut call_target: Signal<String>,
     current_call: Signal<Option<CallInfo>>,
@@ -28,7 +30,11 @@ pub fn CallInterfaceScreen(
     
     // Set listening address for receiver mode
     if *is_receiver_mode.read() {
-        listening_address.set(format!("{}@localhost:5060", username));
+        if let Some(interface_ip) = &selected_interface {
+            listening_address.set(format!("{}@{}:{}", username, interface_ip, port));
+        } else {
+            listening_address.set(format!("{}@0.0.0.0:{}", username, port));
+        }
     }
     
     // Timer to update call duration every second

@@ -467,6 +467,8 @@ pub fn App() -> Element {
                         CallInterfaceScreen {
                             username: username.read().clone(),
                             server_uri: server_uri.read().clone(),
+                            selected_interface: selected_interface.read().clone(),
+                            port: port.read().clone(),
                             sip_coroutine: sip_coroutine.clone(),
                             call_target: call_target.clone(),
                             current_call: current_call.clone(),
