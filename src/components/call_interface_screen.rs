@@ -33,8 +33,8 @@ pub fn CallInterfaceScreen(
         let mut is_on_hook = is_on_hook.clone();
         move || {
             spawn(async move {
-                let client = sip_client.read().clone();
-                let guard = client.read().await;
+                let sip_guard = sip_client.read();
+                let guard = sip_guard.read().await;
                 
                 // Check if we're actually in receiver mode
                 is_receiver_mode.set(guard.is_receiver_mode());
@@ -112,8 +112,8 @@ pub fn CallInterfaceScreen(
                 Some(CallState::Transferring) => {
                     if *is_on_hook.read() {
                         spawn(async move {
-                            let client = sip_client.read().clone();
-                            let guard = client.read().await;
+                            let sip_guard = sip_client.read();
+                            let guard = sip_guard.read().await;
                             if let Ok(_) = guard.set_hook_state(false).await {
                                 is_on_hook.set(false);
                             }
@@ -173,33 +173,43 @@ pub fn CallInterfaceScreen(
                         log::info!("Mute button clicked");
                         let sip_client = sip_client.clone();
                         spawn(async move {
-                            let client = sip_client.read().clone();
-                            let mut guard = client.write().await;
-                            match guard.toggle_mute().await {
+                            log::info!("Mute spawn started");
+                            let sip_guard = sip_client.read();
+                            log::info!("Got client Arc");
+                            let mut client = sip_guard.write().await;
+                            log::info!("Got write guard");
+                            match client.toggle_mute().await {
                                 Ok(is_muted) => log::info!("Toggled mute to: {}", is_muted),
                                 Err(e) => log::error!("Failed to toggle mute: {}", e),
                             }
+                            log::info!("Mute operation complete");
                         });
                     },
                     on_hold_toggle: move |_| {
                         log::info!("Hold button clicked");
                         let sip_client = sip_client.clone();
                         spawn(async move {
-                            let client = sip_client.read().clone();
-                            let mut guard = client.write().await;
+                            log::info!("Hold spawn started");
+                            let sip_guard = sip_client.read();
+                            log::info!("Got client Arc for hold");
+                            let mut client = sip_guard.write().await;
+                            log::info!("Got write guard for hold");
                             
                             // Check if on hold
-                            if guard.is_on_hold().await {
-                                match guard.resume().await {
+                            if client.is_on_hold().await {
+                                log::info!("Call is on hold, resuming...");
+                                match client.resume().await {
                                     Ok(_) => log::info!("Resumed call"),
                                     Err(e) => log::error!("Failed to resume: {}", e),
                                 }
                             } else {
-                                match guard.hold().await {
+                                log::info!("Call is active, putting on hold...");
+                                match client.hold().await {
                                     Ok(_) => log::info!("Put call on hold"),
                                     Err(e) => log::error!("Failed to hold: {}", e),
                                 }
                             }
+                            log::info!("Hold operation complete");
                         });
                     },
                     on_transfer: move |_| {
@@ -210,9 +220,9 @@ pub fn CallInterfaceScreen(
                         let sip_client = sip_client.clone();
                         let mut is_on_hook = is_on_hook.clone();
                         spawn(async move {
-                            let client = sip_client.read().clone();
-                            let mut guard = client.write().await;
-                            if let Ok(new_state) = guard.toggle_hook().await {
+                            let sip_guard = sip_client.read();
+                            let mut client = sip_guard.write().await;
+                            if let Ok(new_state) = client.toggle_hook().await {
                                 log::info!("Hook toggled to: {}", if new_state { "on hook" } else { "off hook" });
                                 is_on_hook.set(new_state);
                             }
