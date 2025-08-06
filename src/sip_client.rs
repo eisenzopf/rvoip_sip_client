@@ -347,8 +347,10 @@ impl SipClientManager {
             // Make the call using the new API
             match client.call(&formatted_uri).await {
                 Ok(call) => {
+                    let call_id_string = call.id.to_string();
+                    info!("Created call with ID: {} (type: {:?})", call_id_string, std::any::type_name_of_val(&call.id));
                     let call_info = CallInfo {
-                        id: call.id.to_string(),
+                        id: call_id_string,
                         remote_uri: target_uri.to_string(),
                         state: CallState::from(*call.state.read()),
                         duration: None,
@@ -378,20 +380,26 @@ impl SipClientManager {
             
             if let Some(client) = &self.client {
                 // Parse the call ID back to CallId type
-                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
-                    match client.hangup(&call_id).await {
-                        Ok(_) => {
-                            *self.current_call.write().await = None;
-                            Ok(())
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Hangup failed: {}", e);
-                            error!("{}", error_msg);
-                            Err(e.into())
+                match CallId::parse_str(&call_info.id) {
+                    Ok(call_id) => {
+                        info!("Parsed call ID successfully for hangup");
+                        match client.hangup(&call_id).await {
+                            Ok(_) => {
+                                info!("Hangup successful");
+                                *self.current_call.write().await = None;
+                                Ok(())
+                            }
+                            Err(e) => {
+                                let error_msg = format!("Hangup failed: {}", e);
+                                error!("{}", error_msg);
+                                Err(e.into())
+                            }
                         }
                     }
-                } else {
-                    Err(anyhow::anyhow!("Invalid call ID format"))
+                    Err(e) => {
+                        error!("Failed to parse call ID '{}': {}", call_info.id, e);
+                        Err(anyhow::anyhow!("Invalid call ID format: {}", e))
+                    }
                 }
             } else {
                 Err(anyhow::anyhow!("Client not initialized"))
@@ -512,26 +520,38 @@ impl SipClientManager {
     
     /// Toggle microphone mute for the current call
     pub async fn toggle_mute(&self) -> Result<bool> {
+        info!("toggle_mute called");
         if let Some(call_info) = self.current_call.read().await.as_ref() {
+            info!("Found current call: {}", call_info.id);
             if let Some(client) = &self.client {
-                if let Ok(call_id) = CallId::parse_str(&call_info.id) {
-                    let current_state = client.is_muted(&call_id).await?;
-                    client.set_mute(&call_id, !current_state).await?;
-                    
-                    // Update the mute state in CallInfo
-                    if let Some(info) = self.current_call.write().await.as_mut() {
-                        info.is_muted = Some(!current_state);
+                info!("Client is available");
+                match CallId::parse_str(&call_info.id) {
+                    Ok(call_id) => {
+                        info!("Parsed call ID successfully from string: {}", call_info.id);
+                        let current_state = client.is_muted(&call_id).await?;
+                        info!("Current mute state: {}", current_state);
+                        client.set_mute(&call_id, !current_state).await?;
+                        info!("Set mute to: {}", !current_state);
+                        
+                        // Update the mute state in CallInfo
+                        if let Some(info) = self.current_call.write().await.as_mut() {
+                            info.is_muted = Some(!current_state);
+                        }
+                        
+                        Ok(!current_state)
                     }
-                    
-                    Ok(!current_state)
-                } else {
-                    Ok(false)
+                    Err(e) => {
+                        error!("Failed to parse call ID '{}': {}", call_info.id, e);
+                        Err(anyhow::anyhow!("Invalid call ID format: {}", e))
+                    }
                 }
             } else {
-                Ok(false)
+                error!("Client not initialized");
+                Err(anyhow::anyhow!("Client not initialized"))
             }
         } else {
-            Ok(false)
+            error!("No active call");
+            Err(anyhow::anyhow!("No active call"))
         }
     }
     
@@ -554,38 +574,54 @@ impl SipClientManager {
     
     /// Put the current call on hold
     pub async fn hold(&self) -> Result<()> {
+        info!("hold called");
         if let Some(call_info) = self.current_call.read().await.as_ref() {
+            info!("Found current call: {}", call_info.id);
             if let Some(client) = &self.client {
+                info!("Client is available");
                 if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    info!("Parsed call ID successfully, calling client.hold");
                     client.hold(&call_id).await?;
+                    info!("Call put on hold successfully");
                     // State will be updated by event handler
                     Ok(())
                 } else {
+                    error!("Failed to parse call ID: {}", call_info.id);
                     Err(anyhow::anyhow!("Invalid call ID format"))
                 }
             } else {
+                error!("Client not initialized");
                 Err(anyhow::anyhow!("Client not initialized"))
             }
         } else {
+            error!("No active call");
             Err(anyhow::anyhow!("No active call"))
         }
     }
     
     /// Resume a held call
     pub async fn resume(&self) -> Result<()> {
+        info!("resume called");
         if let Some(call_info) = self.current_call.read().await.as_ref() {
+            info!("Found current call: {}", call_info.id);
             if let Some(client) = &self.client {
+                info!("Client is available");
                 if let Ok(call_id) = CallId::parse_str(&call_info.id) {
+                    info!("Parsed call ID successfully, calling client.resume");
                     client.resume(&call_id).await?;
+                    info!("Call resumed successfully");
                     // State will be updated by event handler
                     Ok(())
                 } else {
+                    error!("Failed to parse call ID: {}", call_info.id);
                     Err(anyhow::anyhow!("Invalid call ID format"))
                 }
             } else {
+                error!("Client not initialized");
                 Err(anyhow::anyhow!("Client not initialized"))
             }
         } else {
+            error!("No active call");
             Err(anyhow::anyhow!("No active call"))
         }
     }
