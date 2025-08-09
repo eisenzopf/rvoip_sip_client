@@ -118,7 +118,7 @@ pub fn CallControls(
                 button {
                     class: if control_state.hold_enabled {
                         if matches!(call_state, Some(CallState::OnHold)) {
-                            "w-16 h-16 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center"
+                            "w-16 h-16 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center"
                         } else {
                             "w-16 h-16 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg transition-all duration-200 shadow-sm hover:shadow-md flex items-center justify-center"
                         }
