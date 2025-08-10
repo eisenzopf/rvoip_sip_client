@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use crate::sip_client::{CallInfo, CallState};
 use crate::commands::SipCommand;
-use crate::components::{UserInfoBar, CallStatus, CallControls, HookStatus};
+use crate::components::{UserInfoBar, CallStatus, CallControls, HookStatus, TransferDialog};
 use crate::components::call_control_state::CallControlState;
 
 #[component]
@@ -24,6 +24,9 @@ pub fn CallInterfaceScreen(
     
     // Get listening address for receiver mode
     let mut listening_address = use_signal(|| "Loading...".to_string());
+    
+    // Transfer dialog state
+    let mut show_transfer_dialog = use_signal(|| false);
     
     // Check if in receiver mode based on server_uri
     is_receiver_mode.set(server_uri.is_empty());
@@ -180,11 +183,8 @@ pub fn CallInterfaceScreen(
                         }
                     },
                     on_transfer: move |_| {
-                        // TODO: Open transfer dialog
                         log::info!("Transfer button clicked");
-                        // For now, just log. In a real implementation, you'd show a dialog
-                        // to get the transfer target, then send:
-                        // sip_coroutine.send(SipCommand::Transfer { target: transfer_target });
+                        show_transfer_dialog.set(true);
                     },
                     on_hook_toggle: move |_| {
                         log::info!("Hook toggle button clicked");
@@ -192,6 +192,19 @@ pub fn CallInterfaceScreen(
                     },
                     on_end_call: move |_| on_hangup_call.call(())
                     }
+                }
+            }
+            
+            // Transfer dialog
+            TransferDialog {
+                is_open: *show_transfer_dialog.read(),
+                on_transfer: move |target| {
+                    log::info!("Transferring call to: {}", target);
+                    sip_coroutine.send(SipCommand::Transfer { target });
+                    show_transfer_dialog.set(false);
+                },
+                on_close: move |_| {
+                    show_transfer_dialog.set(false);
                 }
             }
             

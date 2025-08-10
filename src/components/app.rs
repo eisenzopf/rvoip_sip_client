@@ -243,6 +243,26 @@ pub fn App() -> Element {
                         }
                     }
                     
+                    SipCommand::Transfer { target } => {
+                        if let Some(call_info) = &current_call_info {
+                            match sip_client.transfer(&call_info.id, &target).await {
+                                Ok(_) => {
+                                    info!("Call transferred to: {}", target);
+                                    // The call should end after successful transfer
+                                    current_call_info = None;
+                                    current_call.set(None);
+                                }
+                                Err(e) => {
+                                    error!("Failed to transfer call: {}", e);
+                                    error_message.set(Some(format!("Failed to transfer: {}", e)));
+                                }
+                            }
+                        } else {
+                            error!("No active call to transfer");
+                            error_message.set(Some("No active call to transfer".to_string()));
+                        }
+                    }
+                    
                     _ => {
                         info!("Command not implemented yet: {:?}", command);
                     }
