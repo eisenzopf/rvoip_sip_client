@@ -78,9 +78,14 @@ pub fn TransferDialog(
                     }
                     button {
                         class: if !transfer_target.read().is_empty() {
-                            "flex-1 px-4 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2"
+                            "flex-1 px-4 py-3 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 hover:opacity-90"
                         } else {
-                            "flex-1 px-4 py-3 bg-gray-100 text-gray-400 rounded-lg font-medium cursor-not-allowed flex items-center justify-center gap-2"
+                            "flex-1 px-4 py-3 rounded-lg font-medium flex items-center justify-center gap-2"
+                        },
+                        style: if !transfer_target.read().is_empty() {
+                            "background-color: rgb(34, 197, 94); color: white; cursor: pointer;"
+                        } else {
+                            "background-color: rgb(243, 244, 246); color: rgb(156, 163, 175); cursor: not-allowed;"
                         },
                         disabled: transfer_target.read().is_empty(),
                         onclick: move |_| {
@@ -91,7 +96,7 @@ pub fn TransferDialog(
                         },
                         PhoneForwarded {
                             size: 18,
-                            color: "currentColor",
+                            color: if !transfer_target.read().is_empty() { "white" } else { "currentColor" },
                             stroke_width: 2
                         }
                         span { "Transfer" }
