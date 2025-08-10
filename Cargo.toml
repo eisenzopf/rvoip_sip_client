@@ -10,7 +10,7 @@ dioxus-logger = "0.5"
 lucide-dioxus = { version = "2.24.0", features = ["communication", "multimedia", "arrows", "development"] }
 
 # RVOIP - Modern Rust VoIP Stack
-rvoip = "0.1.22"
+rvoip = "0.1.23"
 #rvoip = { path = "../rvoip/crates/rvoip" }
 
 # Additional dependencies for async and networking

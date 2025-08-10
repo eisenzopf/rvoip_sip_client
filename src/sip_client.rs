@@ -53,7 +53,8 @@ pub enum CallState {
     Connected,
     OnHold,
     Transferring,
-    Disconnected,
+    Terminating,  // Phase 1: Call is ending, cleanup in progress
+    Disconnected,  // Phase 2: Call fully terminated
     Error(String),
 }
 
@@ -66,6 +67,7 @@ impl From<SipCallState> for CallState {
             SipCallState::Connected => CallState::Connected,
             SipCallState::OnHold => CallState::OnHold,
             SipCallState::Transferring => CallState::Transferring,
+            SipCallState::Terminating => CallState::Terminating,
             SipCallState::Terminated => CallState::Disconnected,
         }
     }
