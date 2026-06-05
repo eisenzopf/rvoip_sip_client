@@ -157,6 +157,8 @@ async fn run_bridge(
     let out_event_tx = event_tx.clone();
     let output_task = tokio::spawn(async move {
         let mut level_tick = 0u32;
+        // Reconstruction filter applied after upsampling 8 kHz to the device rate.
+        let mut playback_lp = LowPass::new(output_sample_rate, TELEPHONE_CUTOFF_HZ);
         while let Some(frame) = receiver.recv().await {
             let mono = frame
                 .samples
@@ -173,7 +175,12 @@ async fn run_bridge(
                     });
                 }
             }
-            let resampled = resample_linear(&mono, frame.sample_rate, output_sample_rate);
+            let mut resampled = resample_linear(&mono, frame.sample_rate, output_sample_rate);
+            if output_sample_rate > frame.sample_rate {
+                for s in resampled.iter_mut() {
+                    *s = playback_lp.process(*s);
+                }
+            }
             if let Ok(mut pb) = playback.lock() {
                 pb.buffer.extend(resampled);
                 let cap = pb.cap_samples;
@@ -210,6 +217,8 @@ async fn send_microphone_frames(
     // Bound the accumulation buffer so latency can't grow without limit if the
     // capture clock runs slightly faster than the 20 ms send clock.
     let max_buffer = (SAMPLE_RATE as usize) / 2; // 0.5 s of 8 kHz audio
+    // Anti-alias filter applied before downsampling the mic to 8 kHz.
+    let mut capture_lp = LowPass::new(input_sample_rate, TELEPHONE_CUTOFF_HZ);
 
     // Drift-free 20 ms send clock. `interval` ticks on absolute deadlines and
     // absorbs processing time, unlike `sleep` which accumulates drift (the old
@@ -236,7 +245,7 @@ async fn send_microphone_frames(
             }
             // Drain whatever the mic captured into the accumulation buffer.
             maybe = mic_rx.recv() => {
-                let Some(samples) = maybe else { return };
+                let Some(mut samples) = maybe else { return };
                 level_tick = level_tick.wrapping_add(1);
                 if level_tick % 5 == 0 {
                     if let Some(tx) = &event_tx {
@@ -244,6 +253,12 @@ async fn send_microphone_frames(
                             direction: AudioDirection::Input,
                             level: rms(&samples),
                         });
+                    }
+                }
+                // Band-limit before decimating to 8 kHz to avoid aliasing.
+                if input_sample_rate > SAMPLE_RATE {
+                    for s in samples.iter_mut() {
+                        *s = capture_lp.process(*s);
                     }
                 }
                 let resampled = resample_linear(&samples, input_sample_rate, SAMPLE_RATE);
@@ -416,6 +431,82 @@ fn mix_to_mono(data: &[f32], channels: usize) -> Vec<f32> {
         .map(|frame| frame.iter().copied().sum::<f32>() / frame.len() as f32)
         .collect()
 }
+
+/// One biquad section (RBJ cookbook low-pass), Direct Form I.
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    fn lowpass(fs: f32, fc: f32, q: f32) -> Self {
+        let w0 = 2.0 * std::f32::consts::PI * fc / fs;
+        let (sin, cos) = w0.sin_cos();
+        let alpha = sin / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: (1.0 - cos) / 2.0 / a0,
+            b1: (1.0 - cos) / a0,
+            b2: (1.0 - cos) / 2.0 / a0,
+            a1: (-2.0 * cos) / a0,
+            a2: (1.0 - alpha) / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// 4th-order Butterworth low-pass (two cascaded biquads). Band-limits to the
+/// telephone passband so the 8 kHz↔device-rate conversions don't alias — the
+/// anti-alias / reconstruction filtering that linear interpolation alone skips.
+/// Stateful, so it stays click-free across streaming blocks.
+struct LowPass {
+    stages: [Biquad; 2],
+}
+
+impl LowPass {
+    fn new(sample_rate: u32, cutoff_hz: f32) -> Self {
+        let fs = sample_rate as f32;
+        // Butterworth Q values for a 4th-order (two-section) response.
+        Self {
+            stages: [
+                Biquad::lowpass(fs, cutoff_hz, 0.541_196_1),
+                Biquad::lowpass(fs, cutoff_hz, 1.306_563),
+            ],
+        }
+    }
+
+    fn process(&mut self, x: f32) -> f32 {
+        let mut s = x;
+        for stage in self.stages.iter_mut() {
+            s = stage.process(s);
+        }
+        s
+    }
+}
+
+/// Low-pass cutoff: top of the telephone passband (G.711 is band-limited anyway).
+const TELEPHONE_CUTOFF_HZ: f32 = 3400.0;
 
 fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
     if input.is_empty() || from_rate == to_rate {
