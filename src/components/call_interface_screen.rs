@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use crate::sip_client::{CallInfo, CallState};
 use crate::commands::SipCommand;
-use crate::components::{UserInfoBar, CallStatus, CallControls, HookStatus, TransferDialog};
+use crate::components::{UserInfoBar, CallStatus, CallControls, HookStatus, TransferDialog, DtmfKeypad, AudioPanel};
 use crate::components::call_control_state::CallControlState;
 
 #[component]
@@ -14,6 +14,8 @@ pub fn CallInterfaceScreen(
     mut call_target: Signal<String>,
     current_call: Signal<Option<CallInfo>>,
     is_on_hook: Signal<bool>,
+    audio_levels: Signal<(f32, f32)>,
+    transfer_in_progress: Signal<bool>,
     on_make_call: EventHandler<()>,
     on_hangup_call: EventHandler<()>,
     on_logout: EventHandler<()>
@@ -88,6 +90,7 @@ pub fn CallInterfaceScreen(
     
     // Get the control state to determine desired hook state
     let _control_state = CallControlState::from_call_state(call_state.as_ref(), is_muted);
+    let is_connected = matches!(call_state.as_ref(), Some(CallState::Connected));
     
     // Automatically set hook state to off during active calls
     use_effect({
@@ -193,14 +196,44 @@ pub fn CallInterfaceScreen(
                     on_end_call: move |_| on_hangup_call.call(())
                     }
                 }
+
+                // Attended transfer controls (shown during a consultation)
+                if *transfer_in_progress.read() {
+                    div {
+                        class: "mt-4 flex gap-3",
+                        button {
+                            class: "flex-1 px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-medium transition-colors",
+                            onclick: move |_| sip_coroutine.send(SipCommand::CompleteAttendedTransfer),
+                            "Complete Transfer"
+                        }
+                        button {
+                            class: "flex-1 px-4 py-3 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-colors",
+                            onclick: move |_| sip_coroutine.send(SipCommand::CancelAttendedTransfer),
+                            "Cancel"
+                        }
+                    }
+                }
+
+                // DTMF keypad during an active call
+                if is_connected {
+                    DtmfKeypad { sip_coroutine }
+                }
+
+                // Audio device selection + level meters
+                AudioPanel { sip_coroutine, audio_levels }
             }
-            
+
             // Transfer dialog
             TransferDialog {
                 is_open: *show_transfer_dialog.read(),
                 on_transfer: move |target| {
-                    log::info!("Transferring call to: {}", target);
+                    log::info!("Blind transfer to: {}", target);
                     sip_coroutine.send(SipCommand::Transfer { target });
+                    show_transfer_dialog.set(false);
+                },
+                on_attended: move |target| {
+                    log::info!("Attended transfer to: {}", target);
+                    sip_coroutine.send(SipCommand::StartAttendedTransfer { target });
                     show_transfer_dialog.set(false);
                 },
                 on_close: move |_| {

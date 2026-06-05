@@ -5,6 +5,7 @@ use lucide_dioxus::PhoneForwarded;
 pub fn TransferDialog(
     is_open: bool,
     on_transfer: EventHandler<String>,
+    on_attended: EventHandler<String>,
     on_close: EventHandler<()>
 ) -> Element {
     let mut transfer_target = use_signal(|| String::new());
@@ -60,7 +61,7 @@ pub fn TransferDialog(
                     value: "{transfer_target.read()}",
                     oninput: move |evt| transfer_target.set(evt.value()),
                     onkeypress: move |evt| {
-                        if evt.key() == dioxus::events::Key::Enter && !transfer_target.read().is_empty() {
+                        if evt.key() == Key::Enter && !transfer_target.read().is_empty() {
                             on_transfer.call(transfer_target.read().clone());
                             transfer_target.set(String::new());
                         }
@@ -68,38 +69,38 @@ pub fn TransferDialog(
                     autofocus: true
                 }
                 
-                // Action buttons
+                // Action buttons: blind vs attended transfer
                 div {
-                    class: "flex gap-3",
-                    button {
-                        class: "flex-1 px-4 py-3 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-all duration-200",
-                        onclick: move |_| on_close.call(()),
-                        "Cancel"
+                    class: "flex flex-col gap-3",
+                    div {
+                        class: "flex gap-3",
+                        button {
+                            class: "flex-1 px-4 py-3 rounded-lg font-medium transition-all duration-200 bg-green-500 hover:bg-green-600 text-white disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed",
+                            disabled: transfer_target.read().is_empty(),
+                            onclick: move |_| {
+                                if !transfer_target.read().is_empty() {
+                                    on_transfer.call(transfer_target.read().clone());
+                                    transfer_target.set(String::new());
+                                }
+                            },
+                            "Blind"
+                        }
+                        button {
+                            class: "flex-1 px-4 py-3 rounded-lg font-medium transition-all duration-200 bg-blue-500 hover:bg-blue-600 text-white disabled:bg-gray-100 disabled:text-gray-400 disabled:cursor-not-allowed",
+                            disabled: transfer_target.read().is_empty(),
+                            onclick: move |_| {
+                                if !transfer_target.read().is_empty() {
+                                    on_attended.call(transfer_target.read().clone());
+                                    transfer_target.set(String::new());
+                                }
+                            },
+                            "Attended"
+                        }
                     }
                     button {
-                        class: if !transfer_target.read().is_empty() {
-                            "flex-1 px-4 py-3 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 hover:opacity-90"
-                        } else {
-                            "flex-1 px-4 py-3 rounded-lg font-medium flex items-center justify-center gap-2"
-                        },
-                        style: if !transfer_target.read().is_empty() {
-                            "background-color: rgb(34, 197, 94); color: white; cursor: pointer;"
-                        } else {
-                            "background-color: rgb(243, 244, 246); color: rgb(156, 163, 175); cursor: not-allowed;"
-                        },
-                        disabled: transfer_target.read().is_empty(),
-                        onclick: move |_| {
-                            if !transfer_target.read().is_empty() {
-                                on_transfer.call(transfer_target.read().clone());
-                                transfer_target.set(String::new());
-                            }
-                        },
-                        PhoneForwarded {
-                            size: 18,
-                            color: if !transfer_target.read().is_empty() { "white" } else { "currentColor" },
-                            stroke_width: 2
-                        }
-                        span { "Transfer" }
+                        class: "px-4 py-2 text-gray-600 hover:text-gray-800 text-sm font-medium",
+                        onclick: move |_| on_close.call(()),
+                        "Cancel"
                     }
                 }
             }

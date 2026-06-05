@@ -4,7 +4,7 @@ use futures_util::StreamExt;
 use crate::sip_client::{CallInfo, CallState, SipClientManager, SipConfig, ConnectionMode};
 use crate::commands::SipCommand;
 use super::{RegistrationScreen, CallInterfaceScreen, IncomingCallScreen};
-use rvoip::sip_client::{SipClientEvent, CallState as SipCallState};
+use crate::event_channel::SipEvent;
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -14,13 +14,16 @@ enum AppState {
     IncomingCall { caller_id: String },
 }
 
+#[allow(non_snake_case)]
 pub fn App() -> Element {
     // State for the SIP client and app flow
     let app_state = use_signal(|| AppState::Registration);
-    let mut registration_state = use_signal(|| CallState::Idle);
+    let registration_state = use_signal(|| CallState::Idle);
     let current_call = use_signal(|| None::<CallInfo>);
     let error_message = use_signal(|| None::<String>);
     let is_on_hook = use_signal(|| true);  // Track hook state in UI
+    let audio_levels = use_signal(|| (0.0f32, 0.0f32)); // (input, output) VU levels
+    let transfer_in_progress = use_signal(|| false); // attended transfer consultation active
     
     // Form fields
     let username = use_signal(|| "".to_string());
@@ -38,9 +41,6 @@ pub fn App() -> Element {
     });
     let port = use_signal(|| "5060".to_string());
     
-    // Create event channel - will be created inside coroutine
-    let last_event = use_signal(|| None::<SipClientEvent>);
-    
     // Create the SIP coroutine that owns the SipClientManager
     // This coroutine processes commands and manages all SIP state
     let sip_coroutine = use_coroutine({
@@ -49,15 +49,19 @@ pub fn App() -> Element {
         let mut is_on_hook = is_on_hook.clone();
         let mut error_message = error_message.clone();
         let mut app_state = app_state.clone();
-        
+        let mut audio_levels = audio_levels.clone();
+        let mut transfer_in_progress = transfer_in_progress.clone();
+
         move |mut rx: UnboundedReceiver<SipCommand>| async move {
             // The coroutine owns the SipClientManager
             let mut sip_client = SipClientManager::new(SipConfig::default());
             let mut current_call_info: Option<CallInfo> = None;
+            // Attended transfer in progress: (held original call, consult id, target).
+            let mut attended: Option<(CallInfo, String, String)> = None;
             let mut hook_state = true; // Start on-hook
             
             // Create event channel for this coroutine
-            let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<SipClientEvent>();
+            let (event_sender, mut event_receiver) = mpsc::unbounded_channel::<SipEvent>();
             
             // Process both commands and events
             loop {
@@ -91,7 +95,10 @@ pub fn App() -> Element {
                         };
                         
                         sip_client.update_config(config);
-                        
+
+                        // Server mode registers; P2P/Receiver do not.
+                        let is_server_mode = !server_uri.is_empty() && !server_uri.contains('@');
+
                         // Initialize the client
                         match sip_client.initialize().await {
                             Ok(_) => {
@@ -104,7 +111,16 @@ pub fn App() -> Element {
                                 match sip_client.start_event_loop().await {
                                     Ok(_) => {
                                         info!("Event loop started");
-                                        app_state.set(AppState::CallInterface);
+                                        if is_server_mode {
+                                            // Don't enter the call UI yet — wait for the
+                                            // RegistrationSuccess event (gated below), not just
+                                            // transport init. Failure keeps us on this screen.
+                                            registration_state.set(CallState::Registering);
+                                            error_message.set(None);
+                                        } else {
+                                            // P2P / Receiver never register — enter directly.
+                                            app_state.set(AppState::CallInterface);
+                                        }
                                     }
                                     Err(e) => {
                                         error!("Failed to start event loop: {}", e);
@@ -244,25 +260,113 @@ pub fn App() -> Element {
                     }
                     
                     SipCommand::Transfer { target } => {
-                        if let Some(call_info) = &current_call_info {
-                            match sip_client.transfer(&call_info.id, &target).await {
+                        let id = current_call_info.as_ref().map(|c| c.id.clone());
+                        match id {
+                            Some(id) => match sip_client.transfer(&id, &target).await {
                                 Ok(_) => {
-                                    info!("Call transferred to: {}", target);
-                                    // The call should end after successful transfer
-                                    current_call_info = None;
-                                    current_call.set(None);
+                                    info!("Blind transfer to {} initiated", target);
+                                    if let Some(ref mut ci) = current_call_info {
+                                        ci.state = CallState::Transferring;
+                                        current_call.set(Some(ci.clone()));
+                                    }
                                 }
                                 Err(e) => {
                                     error!("Failed to transfer call: {}", e);
                                     error_message.set(Some(format!("Failed to transfer: {}", e)));
                                 }
+                            },
+                            None => {
+                                error!("No active call to transfer");
+                                error_message.set(Some("No active call to transfer".to_string()));
                             }
-                        } else {
-                            error!("No active call to transfer");
-                            error_message.set(Some("No active call to transfer".to_string()));
                         }
                     }
-                    
+
+                    SipCommand::SendDtmf { digit } => {
+                        let id = current_call_info.as_ref().map(|c| c.id.clone());
+                        if let Some(id) = id {
+                            if let Err(e) = sip_client.send_dtmf(&id, digit).await {
+                                error!("Failed to send DTMF: {}", e);
+                            }
+                        }
+                    }
+
+                    SipCommand::StartAttendedTransfer { target } => {
+                        let original = current_call_info.clone();
+                        match original {
+                            Some(orig_ci) => {
+                                match sip_client.start_consultation(&orig_ci.id, &target).await {
+                                    Ok(consult_id) => {
+                                        info!("Consultation call {} placed to {}", consult_id, target);
+                                        attended = Some((orig_ci, consult_id.clone(), target.clone()));
+                                        let ci = CallInfo {
+                                            id: consult_id,
+                                            remote_uri: target,
+                                            state: CallState::Calling,
+                                            duration: None,
+                                            is_incoming: false,
+                                            connected_at: None,
+                                            is_muted: Some(false),
+                                        };
+                                        current_call_info = Some(ci.clone());
+                                        current_call.set(Some(ci));
+                                        transfer_in_progress.set(true);
+                                    }
+                                    Err(e) => {
+                                        error!("Attended transfer start failed: {}", e);
+                                        error_message.set(Some(format!("Attended transfer failed: {}", e)));
+                                    }
+                                }
+                            }
+                            None => error!("No active call for attended transfer"),
+                        }
+                    }
+
+                    SipCommand::CompleteAttendedTransfer => {
+                        if let Some((orig_ci, consult, target)) = attended.take() {
+                            match sip_client
+                                .complete_attended_transfer(&orig_ci.id, &consult, &target)
+                                .await
+                            {
+                                Ok(_) => {
+                                    info!("Attended transfer completed");
+                                    current_call_info = None;
+                                    current_call.set(None);
+                                    transfer_in_progress.set(false);
+                                }
+                                Err(e) => {
+                                    error!("Complete attended transfer failed: {}", e);
+                                    error_message.set(Some(format!("Transfer failed: {}", e)));
+                                    attended = Some((orig_ci, consult, target));
+                                }
+                            }
+                        }
+                    }
+
+                    SipCommand::CancelAttendedTransfer => {
+                        if let Some((orig_ci, consult, _target)) = attended.take() {
+                            let _ = sip_client
+                                .cancel_attended_transfer(&orig_ci.id, &consult)
+                                .await;
+                            let mut restored = orig_ci;
+                            restored.state = CallState::Connected;
+                            let orig_id = restored.id.clone();
+                            current_call_info = Some(restored.clone());
+                            current_call.set(Some(restored));
+                            let _ = sip_client.start_audio(&orig_id).await;
+                            transfer_in_progress.set(false);
+                        }
+                    }
+
+                    SipCommand::SetAudioDevice { is_input, device_id } => {
+                        let direction = if is_input {
+                            crate::audio::AudioDirection::Input
+                        } else {
+                            crate::audio::AudioDirection::Output
+                        };
+                        let _ = sip_client.set_audio_device(direction, &device_id);
+                    }
+
                     _ => {
                         info!("Command not implemented yet: {:?}", command);
                     }
@@ -272,13 +376,13 @@ pub fn App() -> Element {
                     // Process events from SIP client
                     Some(event) = event_receiver.recv() => {
                         info!("Coroutine: Processing event {:?}", event);
-                        
-                        match &event {
-                            SipClientEvent::IncomingCall { from, call, .. } => {
+
+                        match event {
+                            SipEvent::IncomingCall { call_id, from, .. } => {
                                 // Check if we're on hook (able to receive calls)
                                 if hook_state {
                                     let call_info = CallInfo {
-                                        id: call.id.to_string(),
+                                        id: call_id.clone(),
                                         remote_uri: from.clone(),
                                         state: CallState::Ringing,
                                         duration: None,
@@ -292,54 +396,152 @@ pub fn App() -> Element {
                                 } else {
                                     // We're off hook, reject the incoming call
                                     info!("Rejecting incoming call - phone is off hook");
-                                    let _ = sip_client.hangup(&call.id.to_string()).await;
+                                    let _ = sip_client.reject_call(&call_id).await;
                                 }
                             }
-                            
-                            SipClientEvent::CallStateChanged { call, new_state, .. } => {
+
+                            SipEvent::Ringing { call_id } => {
                                 if let Some(ref mut call_info) = current_call_info {
-                                    if call_info.id == call.id.to_string() {
-                                        call_info.state = CallState::from(new_state.clone());
-                                        if new_state == &SipCallState::Connected && call_info.connected_at.is_none() {
+                                    if call_info.id == call_id {
+                                        call_info.state = CallState::Ringing;
+                                        current_call.set(Some(call_info.clone()));
+                                    }
+                                }
+                            }
+
+                            SipEvent::Connected { call_id } => {
+                                if let Some(ref mut call_info) = current_call_info {
+                                    if call_info.id == call_id {
+                                        call_info.state = CallState::Connected;
+                                        if call_info.connected_at.is_none() {
                                             call_info.connected_at = Some(chrono::Utc::now());
                                         }
                                         current_call.set(Some(call_info.clone()));
                                     }
                                 }
+                                // Caller side: start mic/speaker audio on answer.
+                                if let Err(e) = sip_client.start_audio(&call_id).await {
+                                    error!("start_audio failed: {}", e);
+                                }
                             }
-                            
-                            SipClientEvent::CallEnded { call } => {
-                                if current_call_info.as_ref().map(|c| c.id == call.id.to_string()).unwrap_or(false) {
+
+                            SipEvent::Ended { call_id, .. } => {
+                                if current_call_info.as_ref().map(|c| c.id == call_id).unwrap_or(false) {
                                     current_call_info = None;
                                     current_call.set(None);
                                 }
+                                sip_client.stop_audio();
                             }
-                            
-                            SipClientEvent::CallOnHold { call } => {
+
+                            SipEvent::Failed { call_id, code, reason } => {
+                                if current_call_info.as_ref().map(|c| c.id == call_id).unwrap_or(false) {
+                                    current_call_info = None;
+                                    current_call.set(None);
+                                }
+                                sip_client.stop_audio();
+                                error_message.set(Some(format!("Call failed ({}): {}", code, reason)));
+                            }
+
+                            SipEvent::OnHold { call_id } => {
                                 if let Some(ref mut call_info) = current_call_info {
-                                    if call_info.id == call.id.to_string() {
+                                    if call_info.id == call_id {
                                         call_info.state = CallState::OnHold;
                                         current_call.set(Some(call_info.clone()));
                                     }
                                 }
                             }
-                            
-                            SipClientEvent::CallResumed { call } => {
+
+                            SipEvent::Resumed { call_id } => {
                                 if let Some(ref mut call_info) = current_call_info {
-                                    if call_info.id == call.id.to_string() {
+                                    if call_info.id == call_id {
                                         call_info.state = CallState::Connected;
                                         current_call.set(Some(call_info.clone()));
                                     }
                                 }
                             }
-                            
-                            SipClientEvent::RegistrationStatusChanged { status, .. } => {
-                                // Update registration state
-                                registration_state.set(CallState::Idle);
+
+                            SipEvent::Muted { call_id, muted } => {
+                                if let Some(ref mut call_info) = current_call_info {
+                                    if call_info.id == call_id {
+                                        call_info.is_muted = Some(muted);
+                                        current_call.set(Some(call_info.clone()));
+                                    }
+                                }
                             }
-                            
+
+                            SipEvent::Registered { registrar } => {
+                                info!("Registered to {}", registrar);
+                                registration_state.set(CallState::Registered);
+                                error_message.set(None);
+                                // Registration confirmed — now show the call UI.
+                                app_state.set(AppState::CallInterface);
+                            }
+
+                            SipEvent::RegistrationFailed { registrar, reason } => {
+                                error!("Registration failed ({}): {}", registrar, reason);
+                                registration_state.set(CallState::Error(reason.clone()));
+                                error_message.set(Some(format!("Registration failed: {}", reason)));
+                                // Stay on the registration screen so creds can be corrected.
+                                app_state.set(AppState::Registration);
+                            }
+
+                            SipEvent::Error { message } => {
+                                error!("SIP error: {}", message);
+                                error_message.set(Some(message));
+                            }
+
+                            SipEvent::ReferRequested { call_id, refer_to, .. } => {
+                                info!("REFER received on {} -> {}", call_id, refer_to);
+                                match sip_client.follow_refer(&call_id, &refer_to).await {
+                                    Ok(new_id) => {
+                                        let ci = CallInfo {
+                                            id: new_id,
+                                            remote_uri: refer_to.clone(),
+                                            state: CallState::Calling,
+                                            duration: None,
+                                            is_incoming: false,
+                                            connected_at: None,
+                                            is_muted: Some(false),
+                                        };
+                                        current_call_info = Some(ci.clone());
+                                        current_call.set(Some(ci));
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to follow transfer: {}", e);
+                                        error_message.set(Some(format!("Transfer failed: {}", e)));
+                                    }
+                                }
+                            }
+
+                            SipEvent::TransferProgress { status, .. } => {
+                                info!("Transfer progress: {}", status);
+                            }
+
+                            SipEvent::TransferCompleted { .. } => {
+                                info!("Transfer completed");
+                                // The original leg ends via CallEnded, which clears the call.
+                            }
+
+                            SipEvent::TransferFailed { reason, .. } => {
+                                error!("Transfer failed: {}", reason);
+                                error_message.set(Some(format!("Transfer failed: {}", reason)));
+                                if let Some(ref mut ci) = current_call_info {
+                                    ci.state = CallState::Connected;
+                                    current_call.set(Some(ci.clone()));
+                                }
+                            }
+
+                            SipEvent::AudioLevel { direction, level } => {
+                                let mut levels = *audio_levels.read();
+                                match direction {
+                                    crate::audio::AudioDirection::Input => levels.0 = level,
+                                    crate::audio::AudioDirection::Output => levels.1 = level,
+                                }
+                                audio_levels.set(levels);
+                            }
+
                             _ => {
-                                info!("Unhandled event in coroutine: {:?}", event);
+                                info!("Unhandled SipEvent in coroutine");
                             }
                         }
                     }
@@ -442,8 +644,10 @@ pub fn App() -> Element {
     // Logout handler
     let on_logout = {
         let mut app_state = app_state.clone();
-        
+        let mut registration_state = registration_state.clone();
+
         move |_| {
+            registration_state.set(CallState::Idle);
             app_state.set(AppState::Registration);
         }
     };
@@ -494,6 +698,8 @@ pub fn App() -> Element {
                             call_target: call_target.clone(),
                             current_call: current_call.clone(),
                             is_on_hook: is_on_hook.clone(),
+                            audio_levels: audio_levels.clone(),
+                            transfer_in_progress: transfer_in_progress.clone(),
                             on_make_call: on_make_call,
                             on_hangup_call: on_hangup,
                             on_logout: on_logout,

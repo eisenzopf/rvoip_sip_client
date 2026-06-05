@@ -53,7 +53,7 @@ pub fn CallControls(
                             oninput: move |evt| call_target.set(evt.value()),
                             disabled: !control_state.make_call_enabled,
                             onkeypress: move |evt| {
-                                if evt.key() == dioxus::events::Key::Enter && control_state.make_call_enabled && !call_target.read().is_empty() {
+                                if evt.key() == Key::Enter && control_state.make_call_enabled && !call_target.read().is_empty() {
                                     on_make_call.call(());
                                 }
                             }

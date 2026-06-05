@@ -77,6 +77,7 @@ pub fn get_available_interfaces() -> Vec<NetworkInterface> {
     interfaces
 }
 
+#[allow(dead_code)]
 pub fn get_default_interface() -> Option<IpAddr> {
     // Try to get the default local IP
     local_ip().ok()

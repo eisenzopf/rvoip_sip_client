@@ -5,12 +5,18 @@ mod components;
 mod event_channel;
 mod network_utils;
 mod commands;
+mod audio;
 
 use components::App;
 
 fn main() {
-    // Initialize logging
-    env_logger::init();
+    // Initialize logging. Default to a quiet filter so rvoip's per-packet DEBUG
+    // firehose doesn't starve the real-time audio threads. RUST_LOG overrides
+    // this (e.g. `RUST_LOG=debug` for diagnostics).
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,sip_client=info"),
+    )
+    .init();
     
     info!("Starting SIP Client");
     

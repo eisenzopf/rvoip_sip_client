@@ -159,6 +159,7 @@ impl CallControlState {
         }
     }
     
+    #[allow(dead_code)]
     pub fn get_button_class(&self, style: &ButtonStyle) -> &'static str {
         match style {
             ButtonStyle::Normal => "px-6 py-3 bg-gray-200 hover:bg-gray-300 text-gray-800 rounded-lg font-medium transition-all duration-200 shadow-sm hover:shadow-md",

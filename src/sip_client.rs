@@ -1,11 +1,20 @@
-use anyhow::Result;
-use log::{info, error};
+use anyhow::{anyhow, Result};
+use log::{error, info};
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
-// Import rvoip sip-client types
-use rvoip::sip_client::{SipClient, SipClientBuilder, SipClientEvent, AudioDirection, CallId, CallState as SipCallState};
+// New rvoip (0.2.x) SIP surface. The old `rvoip::sip_client` module is gone;
+// everything below comes from `rvoip::sip` (re-exported `rvoip-sip`).
+use rvoip::sip::{
+    Config, Event, EventReceiver, PeerControl, RegistrationHandle, SessionId, StreamPeer,
+    UnifiedCoordinator,
+};
+
+use crate::audio::{AudioBridge, AudioDirection, RunningAudio};
+use crate::event_channel::SipEvent;
 
 #[derive(Debug, Clone)]
 pub enum ConnectionMode {
@@ -22,10 +31,10 @@ pub enum ConnectionMode {
 
 #[derive(Debug, Clone)]
 pub struct SipConfig {
-    pub display_name: String,  // User's display name
+    pub display_name: String, // User's display name
     pub connection_mode: ConnectionMode,
     pub local_port: u16,
-    pub local_ip: Option<String>,  // Optional local IP to bind to
+    pub local_ip: Option<String>, // Optional local IP to bind to
 }
 
 impl Default for SipConfig {
@@ -44,6 +53,7 @@ impl Default for SipConfig {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Terminating/Disconnected are part of the state model
 pub enum CallState {
     Idle,
     Registering,
@@ -54,23 +64,8 @@ pub enum CallState {
     OnHold,
     Transferring,
     Terminating,  // Phase 1: Call is ending, cleanup in progress
-    Disconnected,  // Phase 2: Call fully terminated
+    Disconnected, // Phase 2: Call fully terminated
     Error(String),
-}
-
-impl From<SipCallState> for CallState {
-    fn from(state: SipCallState) -> Self {
-        match state {
-            SipCallState::Initiating => CallState::Calling,
-            SipCallState::Ringing => CallState::Ringing,
-            SipCallState::IncomingRinging => CallState::Ringing,
-            SipCallState::Connected => CallState::Connected,
-            SipCallState::OnHold => CallState::OnHold,
-            SipCallState::Transferring => CallState::Transferring,
-            SipCallState::Terminating => CallState::Terminating,
-            SipCallState::Terminated => CallState::Disconnected,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -84,99 +79,187 @@ pub struct CallInfo {
     pub is_muted: Option<bool>,
 }
 
-/// SipClientManager handles SIP operations
-/// This struct is now owned exclusively by the coroutine to avoid lock contention
-/// State management (current_call, registration_state, is_on_hook) is handled by the coroutine
+/// SipClientManager handles SIP operations.
+///
+/// This struct is owned exclusively by the UI coroutine to avoid lock
+/// contention; per-call state (current_call, registration_state, hook) is
+/// tracked by the coroutine. The manager wraps the rvoip [`StreamPeer`]
+/// command half ([`PeerControl`]) plus its [`UnifiedCoordinator`] for per-call
+/// [`SessionHandle`](rvoip::sip::SessionHandle) access.
 pub struct SipClientManager {
     config: SipConfig,
-    client: Option<SipClient>,
-    event_sender: Option<mpsc::UnboundedSender<SipClientEvent>>,
+    /// Command half of the StreamPeer (accept/reject/invite/register).
+    control: Option<PeerControl>,
+    /// Coordinator used to obtain per-call `SessionHandle`s.
+    coordinator: Option<Arc<UnifiedCoordinator>>,
+    /// Active registration, kept alive so auto-refresh continues.
+    reg_handle: Option<RegistrationHandle>,
+    /// Event stream produced at `initialize`, consumed by `start_event_loop`.
+    pending_events: Option<EventReceiver>,
+    event_sender: Option<mpsc::UnboundedSender<SipEvent>>,
     event_task: Option<tokio::task::JoinHandle<()>>,
+    /// Shared mute flag; the cpal bridge emits silence while set (rvoip
+    /// `mute()` only signals). Shared with the active [`RunningAudio`].
+    muted: Arc<AtomicBool>,
+    /// Active cpal audio bridge for the in-progress call, if any.
+    running_audio: Option<RunningAudio>,
+    /// Selected capture/playback device selectors (name or index).
+    audio_input_device: Option<String>,
+    audio_output_device: Option<String>,
 }
 
+#[allow(dead_code)] // some accessors are retained as manager API for the UI
 impl SipClientManager {
     pub fn new(config: SipConfig) -> Self {
         Self {
             config,
-            client: None,
+            control: None,
+            coordinator: None,
+            reg_handle: None,
+            pending_events: None,
             event_sender: None,
             event_task: None,
+            muted: Arc::new(AtomicBool::new(false)),
+            running_audio: None,
+            audio_input_device: None,
+            audio_output_device: None,
+        }
+    }
+
+    /// Build an rvoip [`Config`] for the current connection mode, plus optional
+    /// registration parameters `(registrar, username, password)`.
+    fn build_config(&self) -> Result<(Config, Option<(String, String, String)>)> {
+        let port = self.config.local_port;
+        let bind_ip: IpAddr = self
+            .config
+            .local_ip
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+            .or_else(|| local_ip_address::local_ip().ok())
+            .unwrap_or(IpAddr::from([127, 0, 0, 1]));
+
+        match &self.config.connection_mode {
+            ConnectionMode::Server {
+                server_uri,
+                username,
+                password,
+            } => {
+                let server_host = server_uri
+                    .strip_prefix("sip:")
+                    .unwrap_or(server_uri)
+                    .to_string();
+                let registrar = if server_uri.starts_with("sip:") {
+                    server_uri.clone()
+                } else {
+                    format!("sip:{}", server_uri)
+                };
+
+                let mut config = Config::on(username, bind_ip, port);
+                // Address-of-record used in the From header (sip:user@domain).
+                config.local_uri = format!("sip:{}@{}", username, server_host);
+                // Reachable Contact so the registrar can route INVITEs back to us.
+                config.contact_uri = Some(format!("sip:{}@{}:{}", username, bind_ip, port));
+                // Default UAC digest credentials so challenged outbound requests
+                // (INVITE, etc.) can authenticate — Asterisk challenges calls too,
+                // not just REGISTER. Without this, INVITEs 401 and the call fails.
+                config.credentials = Some(rvoip::sip::types::Credentials::new(
+                    username.clone(),
+                    password.clone(),
+                ));
+
+                Ok((
+                    config,
+                    Some((registrar, username.clone(), password.clone())),
+                ))
+            }
+            ConnectionMode::PeerToPeer { .. } | ConnectionMode::Receiver => {
+                // No registration; identity is sip:display_name@ip:port.
+                let config = Config::on(&self.config.display_name, bind_ip, port);
+                Ok((config, None))
+            }
         }
     }
 
     pub async fn initialize(&mut self) -> Result<()> {
         info!("Initializing SIP client with config: {:?}", self.config);
-        
-        let client = match &self.config.connection_mode {
-            ConnectionMode::Server { server_uri, username, password } => {
-                // Server mode: extract host and build identity
-                let server_host = if server_uri.starts_with("sip:") {
-                    server_uri.strip_prefix("sip:").unwrap_or(server_uri)
-                } else {
-                    server_uri
-                };
-                
-                let sip_identity = format!("sip:{}@{}", username, server_host);
-                
-                // Create client with registration
-                let local_addr = if let Some(ip) = &self.config.local_ip {
-                    format!("{}:{}", ip, self.config.local_port)
-                } else {
-                    format!("0.0.0.0:{}", self.config.local_port)
-                };
-                
-                SipClientBuilder::new()
-                    .sip_identity(sip_identity.clone())
-                    .local_address(local_addr.parse()?)
-                    .register(|reg| {
-                        reg.credentials(username.clone(), password.clone())
-                           .expires(3600)
-                    })
-                    .build()
-                    .await?
+
+        // Tear down any previous peer so a re-login can re-bind the local port
+        // (otherwise the second attempt fails with "address already in use").
+        if let Some(task) = self.event_task.take() {
+            task.abort();
+        }
+        self.stop_audio();
+        self.reg_handle = None;
+        self.control = None;
+        self.pending_events = None;
+        if let Some(coord) = self.coordinator.take() {
+            let _ = coord.shutdown_gracefully(Some(Duration::from_secs(1))).await;
+        }
+
+        let built = self.build_config()?;
+        let registration = built.1;
+        let contact_uri = built.0.contact_uri; // reachable Contact incl. :port
+
+        // Bind with a short retry: on re-login to the same port, the previous
+        // socket can take a moment to release after the graceful shutdown above.
+        let mut peer = None;
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 1..=5u32 {
+            let config = self.build_config()?.0;
+            info!(
+                "SIP bind attempt {}/5: {} (bind {})",
+                attempt, config.local_uri, config.bind_addr
+            );
+            match StreamPeer::with_config(config).await {
+                Ok(p) => {
+                    peer = Some(p);
+                    break;
+                }
+                Err(e) => {
+                    info!("SIP bind attempt {} failed: {}", attempt, e);
+                    last_err = Some(e.into());
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                }
             }
-            ConnectionMode::PeerToPeer { .. } | ConnectionMode::Receiver => {
-                // P2P mode or Receiver mode: simple identity without registration
-                // Use configured IP or detect one
-                let identity_ip = if let Some(ip) = &self.config.local_ip {
-                    ip.clone()
-                } else if matches!(self.config.connection_mode, ConnectionMode::Receiver) {
-                    // Try to get actual local IP for receiver mode
-                    local_ip_address::local_ip()
-                        .map(|ip| ip.to_string())
-                        .unwrap_or_else(|_| "127.0.0.1".to_string())
-                } else {
-                    "127.0.0.1".to_string()
-                };
-                
-                let sip_identity = format!("sip:{}@{}:{}", 
-                    self.config.display_name, 
-                    identity_ip,
-                    self.config.local_port
-                );
-                
-                // Create client without registration
-                let local_addr = if let Some(ip) = &self.config.local_ip {
-                    format!("{}:{}", ip, self.config.local_port)
-                } else {
-                    format!("0.0.0.0:{}", self.config.local_port)
-                };
-                
-                SipClientBuilder::new()
-                    .sip_identity(sip_identity.clone())
-                    .local_address(local_addr.parse()?)
-                    .build()
-                    .await?
+        }
+        let peer = peer
+            .ok_or_else(|| last_err.unwrap_or_else(|| anyhow!("failed to bind SIP transport")))?;
+        let (control, events) = peer.split();
+        self.coordinator = Some(control.coordinator().clone());
+
+        // Server mode registers immediately; success/failure arrives as an event.
+        if let Some((registrar, username, password)) = registration {
+            let mut builder = control
+                .register(registrar.clone(), username, password)
+                .with_expires(3600);
+            // Advertise the reachable transport address (incl. :port) so the
+            // registrar routes inbound calls back to us, not the port-less AOR.
+            if let Some(contact) = &contact_uri {
+                builder = builder.with_contact_uri(contact.clone());
             }
-        };
-        
-        // Start the client
-        client.start().await?;
-        
-        // Store the client
-        self.client = Some(client);
-        
-        info!("SIP client initialized successfully in {:?} mode", 
+            match builder.send().await {
+                Ok(handle) => {
+                    info!("REGISTER sent to {} (contact {:?})", registrar, contact_uri);
+                    self.reg_handle = Some(handle);
+                }
+                Err(e) => {
+                    // Non-fatal here: surface via the error channel; the user can retry.
+                    error!("Registration request failed: {}", e);
+                    if let Some(sender) = &self.event_sender {
+                        let _ = sender.send(SipEvent::RegistrationFailed {
+                            registrar,
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        self.control = Some(control);
+        self.pending_events = Some(events);
+
+        info!(
+            "SIP client initialized in {} mode",
             match &self.config.connection_mode {
                 ConnectionMode::Server { .. } => "Server",
                 ConnectionMode::PeerToPeer { .. } => "P2P",
@@ -185,204 +268,175 @@ impl SipClientManager {
         );
         Ok(())
     }
-    
-    pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<SipClientEvent>) {
+
+    pub fn set_event_sender(&mut self, sender: mpsc::UnboundedSender<SipEvent>) {
         self.event_sender = Some(sender);
     }
-    
-    /// Start the event forwarding loop
-    /// Events are forwarded to the coroutine for processing
+
+    /// Drain the rvoip event stream, translate to [`SipEvent`], and forward to
+    /// the UI coroutine.
     pub async fn start_event_loop(&mut self) -> Result<()> {
-        if let Some(client) = &self.client {
-            // Start event forwarding task
-            let mut events = client.event_iter();
-            let event_sender = self.event_sender.clone();
-            
-            let task = tokio::spawn(async move {
-                while let Some(event) = events.next().await {
-                    // Log all received events
-                    info!("Received event: {:?}", event);
-                    
-                    // Forward event to coroutine if sender is available
-                    if let Some(sender) = &event_sender {
-                        let _ = sender.send(event.clone());
+        let mut events = self
+            .pending_events
+            .take()
+            .ok_or_else(|| anyhow!("Event stream not available (initialize first)"))?;
+        let event_sender = self
+            .event_sender
+            .clone()
+            .ok_or_else(|| anyhow!("Event sender not set"))?;
+
+        let task = tokio::spawn(async move {
+            while let Some(event) = events.next().await {
+                info!("rvoip event: {:?}", event);
+                if let Some(sip_event) = translate_event(event) {
+                    if event_sender.send(sip_event).is_err() {
+                        break; // UI gone
                     }
-                    
-                    // Note: State management is now handled by the coroutine
-                    // We just forward events here
                 }
-            });
-            
-            self.event_task = Some(task);
-            info!("Event loop started");
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("Client not available"))
-        }
+            }
+            info!("Event loop ended");
+        });
+
+        self.event_task = Some(task);
+        info!("Event loop started");
+        Ok(())
     }
 
     pub async fn register(&mut self) -> Result<()> {
-        info!("Registration is automatic with SipClientBuilder when credentials are provided");
-        // Registration happens automatically when the client starts if credentials were provided
+        // Registration happens during initialize() for Server mode.
+        info!("register(): registration is performed during initialize()");
         Ok(())
     }
 
     pub async fn make_call(&mut self, target_uri: &str) -> Result<String> {
-        // Format the target URI based on connection mode
-        let formatted_uri = match &self.config.connection_mode {
-            ConnectionMode::PeerToPeer { target_uri: connected_peer } => {
-                // In P2P mode, ensure the target has proper SIP URI format
-                if target_uri.contains('@') {
-                    // Already a full SIP URI
-                    target_uri.to_string()
-                } else if target_uri.starts_with("sip:") {
-                    // Has sip: prefix but might need formatting
-                    target_uri.to_string()
-                } else {
-                    // Just a name/extension, format it with the connected peer's domain
-                    // Extract domain from connected peer (e.g., "alice@192.168.1.100" -> "192.168.1.100")
-                    if let Some(at_pos) = connected_peer.find('@') {
-                        let domain = &connected_peer[at_pos + 1..];
-                        format!("sip:{}@{}", target_uri, domain)
-                    } else {
-                        // Fallback to direct URI
-                        format!("sip:{}", target_uri)
-                    }
-                }
+        let formatted_uri = self.format_target_uri(target_uri);
+        info!("Making call to {} (formatted: {})", target_uri, formatted_uri);
+
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+
+        match control.invite(formatted_uri).send().await {
+            Ok(call_id) => {
+                self.muted.store(false, Ordering::SeqCst);
+                let id = call_id.to_string();
+                info!("Created call with ID: {}", id);
+                Ok(id)
             }
-            ConnectionMode::Server { .. } => {
-                // In server mode, use the target as-is (server handles routing)
-                if target_uri.starts_with("sip:") {
+            Err(e) => {
+                error!("Make call failed: {}", e);
+                Err(e.into())
+            }
+        }
+    }
+
+    /// Format a dialed target into a SIP URI based on the connection mode.
+    fn format_target_uri(&self, target_uri: &str) -> String {
+        match &self.config.connection_mode {
+            ConnectionMode::PeerToPeer {
+                target_uri: connected_peer,
+            } => {
+                if target_uri.contains('@') || target_uri.starts_with("sip:") {
                     target_uri.to_string()
+                } else if let Some(at_pos) = connected_peer.find('@') {
+                    let domain = &connected_peer[at_pos + 1..];
+                    format!("sip:{}@{}", target_uri, domain)
                 } else {
                     format!("sip:{}", target_uri)
+                }
+            }
+            ConnectionMode::Server { server_uri, .. } => {
+                // Dial extensions through the registrar: sip:<ext>@<server-host>,
+                // so the INVITE targets the server (which routes by dialplan)
+                // rather than trying to DNS-resolve a bare extension.
+                if target_uri.starts_with("sip:") {
+                    target_uri.to_string()
+                } else if target_uri.contains('@') {
+                    format!("sip:{}", target_uri)
+                } else {
+                    let server_host = server_uri.strip_prefix("sip:").unwrap_or(server_uri);
+                    format!("sip:{}@{}", target_uri, server_host)
                 }
             }
             ConnectionMode::Receiver => {
-                // In receiver mode, format with SIP URI
                 if target_uri.starts_with("sip:") {
                     target_uri.to_string()
                 } else {
                     format!("sip:{}", target_uri)
                 }
             }
-        };
-        
-        info!("Making call to: {} (formatted as: {})", target_uri, formatted_uri);
-
-        if let Some(client) = &self.client {
-            // Make the call using the new API
-            match client.call(&formatted_uri).await {
-                Ok(call) => {
-                    let call_id_string = call.id.to_string();
-                    info!("Created call with ID: {} (type: {:?})", call_id_string, std::any::type_name_of_val(&call.id));
-                    Ok(call.id.to_string())
-                }
-                Err(e) => {
-                    let error_msg = format!("Make call failed: {}", e);
-                    error!("{}", error_msg);
-                    Err(e.into())
-                }
-            }
-        } else {
-            Err(anyhow::anyhow!("Client not initialized"))
         }
     }
 
     pub async fn hangup(&mut self, call_id_str: &str) -> Result<()> {
         info!("Hanging up call: {}", call_id_str);
-        
-        if let Some(client) = &self.client {
-            // Parse the call ID back to CallId type
-            // Try to parse the call ID - it might be a UUID string
-            let call_id_result = if let Ok(uuid) = Uuid::parse_str(call_id_str) {
-                CallId::parse_str(&uuid.to_string())
-            } else {
-                CallId::parse_str(call_id_str)
-            };
-            
-            match call_id_result {
-                Ok(call_id) => {
-                    info!("Parsed call ID successfully for hangup");
-                    match client.hangup(&call_id).await {
-                        Ok(_) => {
-                            info!("Hangup successful");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Hangup failed: {}", e);
-                            error!("{}", error_msg);
-                            Err(e.into())
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to parse call ID '{}': {}", call_id_str, e);
-                    Err(anyhow::anyhow!("Invalid call ID format: {}", e))
-                }
-            }
-        } else {
-            Err(anyhow::anyhow!("Client not initialized"))
-        }
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let id = SessionId(call_id_str.to_string());
+        let result = coord.session(&id).hangup().await;
+        self.stop_audio();
+        self.muted.store(false, Ordering::SeqCst);
+        result.map_err(|e| {
+            error!("Hangup failed: {}", e);
+            anyhow!("Hangup failed: {}", e)
+        })?;
+        info!("Hangup successful");
+        Ok(())
     }
 
     pub async fn answer_call(&mut self, call_id_str: &str) -> Result<()> {
         info!("Answering incoming call: {}", call_id_str);
-        
-        if let Some(client) = &self.client {
-            // Parse the call ID back to CallId type
-            // Try to parse the call ID - it might be a UUID string
-            let call_id_result = if let Ok(uuid) = Uuid::parse_str(call_id_str) {
-                CallId::parse_str(&uuid.to_string())
-            } else {
-                CallId::parse_str(call_id_str)
-            };
-            
-            match call_id_result {
-                Ok(call_id) => {
-                    info!("Successfully parsed call ID for answer: {}", call_id_str);
-                    match client.answer(&call_id).await {
-                        Ok(_) => {
-                            info!("Answer call succeeded");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Answer call failed: {}", e);
-                            error!("{}", error_msg);
-                            Err(e.into())
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Failed to parse call ID '{}' for answer: {}", call_id_str, e);
-                    Err(anyhow::anyhow!("Invalid call ID format: {}", e))
-                }
-            }
-        } else {
-            Err(anyhow::anyhow!("Client not initialized"))
+        let control = self
+            .control
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let id = SessionId(call_id_str.to_string());
+        control.accept(&id).await.map_err(|e| {
+            error!("Answer call failed: {}", e);
+            anyhow!("Answer call failed: {}", e)
+        })?;
+        self.muted.store(false, Ordering::SeqCst);
+        // Callee side: no CallAnswered event arrives here, so wire audio now.
+        if let Err(e) = self.start_audio(call_id_str).await {
+            error!("Failed to start audio after answer: {}", e);
         }
+        info!("Answer call succeeded");
+        Ok(())
     }
 
+    /// Reject an incoming (ringing) call with 486 Busy Here.
+    pub async fn reject_call(&mut self, call_id_str: &str) -> Result<()> {
+        info!("Rejecting incoming call: {}", call_id_str);
+        let control = self
+            .control
+            .as_ref()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let id = SessionId(call_id_str.to_string());
+        control
+            .reject(&id, 486, "Busy Here")
+            .await
+            .map_err(|e| anyhow!("Reject failed: {}", e))
+    }
 
     pub fn get_config(&self) -> &SipConfig {
         &self.config
     }
-    
-    /// Get the listening address for receiver mode
+
+    /// Get the listening address for receiver mode.
     pub fn get_listening_address(&self) -> Option<String> {
         match &self.config.connection_mode {
             ConnectionMode::Receiver => {
-                let local_ip = if let Some(ip) = &self.config.local_ip {
-                    ip.clone()
-                } else {
+                let local_ip = self.config.local_ip.clone().unwrap_or_else(|| {
                     local_ip_address::local_ip()
                         .map(|ip| ip.to_string())
                         .unwrap_or_else(|_| "127.0.0.1".to_string())
-                };
-                Some(format!("{}@{}:{}", 
-                    self.config.display_name, 
-                    local_ip, 
-                    self.config.local_port
+                });
+                Some(format!(
+                    "{}@{}:{}",
+                    self.config.display_name, local_ip, self.config.local_port
                 ))
             }
             _ => None,
@@ -392,147 +446,348 @@ impl SipClientManager {
     pub fn is_receiver_mode(&self) -> bool {
         matches!(self.config.connection_mode, ConnectionMode::Receiver)
     }
-    
-    
+
     pub fn update_config(&mut self, config: SipConfig) {
         self.config = config;
     }
-    
-    /// Toggle microphone mute for the current call
-    pub async fn toggle_mute(&self, call_id_str: &str) -> Result<bool> {
-        info!("toggle_mute called for call: {}", call_id_str);
-        if let Some(client) = &self.client {
-            info!("Client is available");
-            // Try to parse the call ID - it might be a UUID string
-            let call_id_result = if let Ok(uuid) = Uuid::parse_str(call_id_str) {
-                // Try creating CallId from UUID
-                CallId::parse_str(&uuid.to_string())
-            } else {
-                // Try parsing directly
-                CallId::parse_str(call_id_str)
-            };
-            
-            match call_id_result {
-                Ok(call_id) => {
-                    info!("Parsed call ID successfully from string: {}", call_id_str);
-                    let current_state = client.is_muted(&call_id).await?;
-                    info!("Current mute state: {}", current_state);
-                    client.set_mute(&call_id, !current_state).await?;
-                    info!("Set mute to: {}", !current_state);
-                    
-                    Ok(!current_state)
-                }
-                Err(e) => {
-                    error!("Failed to parse call ID '{}': {}", call_id_str, e);
-                    Err(anyhow::anyhow!("Invalid call ID format: {}", e))
-                }
-            }
+
+    /// Toggle microphone mute for the active call.
+    ///
+    /// rvoip's `mute()/unmute()` only emit signalling events; actual silencing
+    /// is enforced by the audio bridge (audio task). Returns the new state.
+    pub async fn toggle_mute(&mut self, call_id_str: &str) -> Result<bool> {
+        info!("toggle_mute for call: {}", call_id_str);
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let id = SessionId(call_id_str.to_string());
+        let new_state = !self.muted.load(Ordering::SeqCst);
+        self.muted.store(new_state, Ordering::SeqCst);
+        // Best-effort signalling; the audio bridge enforces actual silence.
+        let session = coord.session(&id);
+        let _ = if new_state {
+            session.mute().await
         } else {
-            error!("Client not initialized");
-            Err(anyhow::anyhow!("Client not initialized"))
-        }
+            session.unmute().await
+        };
+        info!("Set mute to: {}", new_state);
+        Ok(new_state)
     }
-    
-    
-    /// Put the current call on hold
+
+    /// Put the active call on hold.
     pub async fn hold(&self, call_id_str: &str) -> Result<()> {
-        info!("hold called for call: {}", call_id_str);
-        if let Some(client) = &self.client {
-            info!("Client is available");
-            // Try to parse the call ID - it might be a UUID string
-            let call_id_result = if let Ok(uuid) = Uuid::parse_str(call_id_str) {
-                CallId::parse_str(&uuid.to_string())
-            } else {
-                CallId::parse_str(call_id_str)
-            };
-            
-            match call_id_result {
-                Ok(call_id) => {
-                    info!("Parsed call ID successfully, calling client.hold");
-                    client.hold(&call_id).await?;
-                    info!("Call put on hold successfully");
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to parse call ID '{}': {}", call_id_str, e);
-                    Err(anyhow::anyhow!("Invalid call ID format: {}", e))
-                }
-            }
-        } else {
-            error!("Client not initialized");
-            Err(anyhow::anyhow!("Client not initialized"))
-        }
+        info!("hold for call: {}", call_id_str);
+        let coord = self.coord()?;
+        let id = SessionId(call_id_str.to_string());
+        coord.session(&id).hold().await?;
+        info!("Call put on hold");
+        Ok(())
     }
-    
-    /// Resume a held call
+
+    /// Resume a held call.
     pub async fn resume(&self, call_id_str: &str) -> Result<()> {
-        info!("resume called for call: {}", call_id_str);
-        if let Some(client) = &self.client {
-            info!("Client is available");
-            // Try to parse the call ID - it might be a UUID string
-            let call_id_result = if let Ok(uuid) = Uuid::parse_str(call_id_str) {
-                CallId::parse_str(&uuid.to_string())
-            } else {
-                CallId::parse_str(call_id_str)
-            };
-            
-            match call_id_result {
-                Ok(call_id) => {
-                    info!("Parsed call ID successfully, calling client.resume");
-                    client.resume(&call_id).await?;
-                    info!("Call resumed successfully");
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to parse call ID '{}': {}", call_id_str, e);
-                    Err(anyhow::anyhow!("Invalid call ID format: {}", e))
-                }
-            }
-        } else {
-            error!("Client not initialized");
-            Err(anyhow::anyhow!("Client not initialized"))
-        }
+        info!("resume for call: {}", call_id_str);
+        let coord = self.coord()?;
+        let id = SessionId(call_id_str.to_string());
+        coord.session(&id).resume().await?;
+        info!("Call resumed");
+        Ok(())
     }
-    
-    
-    /// Transfer the current call to another party
+
+    /// Send a DTMF digit on the active call.
+    pub async fn send_dtmf(&self, call_id_str: &str, digit: char) -> Result<()> {
+        let coord = self.coord()?;
+        let id = SessionId(call_id_str.to_string());
+        coord.session(&id).send_dtmf(digit).await?;
+        Ok(())
+    }
+
+    /// Blind-transfer the active call to `target_uri` (RFC 3515).
     pub async fn transfer(&self, call_id_str: &str, target_uri: &str) -> Result<()> {
-        if let Some(client) = &self.client {
-            if let Ok(call_id) = CallId::parse_str(call_id_str) {
-                client.transfer(&call_id, target_uri).await?;
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("Invalid call ID format"))
-            }
-        } else {
-            Err(anyhow::anyhow!("Client not initialized"))
+        info!("Blind transfer {} -> {}", call_id_str, target_uri);
+        let coord = self.coord()?;
+        let id = SessionId(call_id_str.to_string());
+        coord.session(&id).transfer_blind(target_uri).await?;
+        Ok(())
+    }
+
+    /// React to an inbound REFER (we are the transferee): tear down the original
+    /// leg and place a fresh call to `refer_to`. Mirrors rvoip example
+    /// `05-blind-transfer`. Returns the new call id.
+    pub async fn follow_refer(&mut self, original_id: &str, refer_to: &str) -> Result<String> {
+        info!("Following REFER {} -> {}", original_id, refer_to);
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let control = self
+            .control
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let oid = SessionId(original_id.to_string());
+        let _ = coord.session(&oid).hangup().await;
+        self.stop_audio();
+        let new_id = control.invite(refer_to.to_string()).send().await?;
+        Ok(new_id.to_string())
+    }
+
+    /// Begin an attended transfer: hold + detach audio from the original call
+    /// and place a consultation call to `target`. Returns the consultation call
+    /// id (the caller should start audio for it once it answers).
+    pub async fn start_consultation(&mut self, original_id: &str, target: &str) -> Result<String> {
+        info!("Attended transfer: consulting {} (original {})", target, original_id);
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let control = self
+            .control
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let oid = SessionId(original_id.to_string());
+        // Hold the original and free the mic/speaker for the consultation leg.
+        let _ = coord.session(&oid).hold().await;
+        self.stop_audio();
+        let formatted = self.format_target_uri(target);
+        let consult_id = control.invite(formatted).send().await?;
+        Ok(consult_id.to_string())
+    }
+
+    /// Complete an attended transfer: REFER the original call to `target` with
+    /// the consultation's dialog as RFC 3891 `Replaces`, connecting the two
+    /// parties. Mirrors rvoip example `06-attended-transfer`.
+    pub async fn complete_attended_transfer(
+        &mut self,
+        original_id: &str,
+        consult_id: &str,
+        target: &str,
+    ) -> Result<()> {
+        info!(
+            "Attended transfer: completing original={} consult={}",
+            original_id, consult_id
+        );
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let consult = SessionId(consult_id.to_string());
+        let replaces = coord
+            .session(&consult)
+            .dialog_identity()
+            .await?
+            .and_then(|id| id.to_replaces_value())
+            .ok_or_else(|| anyhow!("consultation dialog not yet confirmed"))?;
+        let refer_to = self.format_target_uri(target);
+        let original = SessionId(original_id.to_string());
+        coord
+            .session(&original)
+            .transfer_attended(&refer_to, &replaces)
+            .await?;
+        self.stop_audio();
+        Ok(())
+    }
+
+    /// Cancel an attended transfer: drop the consultation call and resume the
+    /// original. Returns the original call id so the caller can restart audio.
+    pub async fn cancel_attended_transfer(
+        &mut self,
+        original_id: &str,
+        consult_id: &str,
+    ) -> Result<()> {
+        info!(
+            "Attended transfer: cancelling consult={} resume original={}",
+            consult_id, original_id
+        );
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let consult = SessionId(consult_id.to_string());
+        let _ = coord.session(&consult).hangup().await;
+        self.stop_audio();
+        let original = SessionId(original_id.to_string());
+        let _ = coord.session(&original).resume().await;
+        Ok(())
+    }
+
+    /// Start the cpal audio bridge for `call_id_str` (idempotent).
+    pub async fn start_audio(&mut self, call_id_str: &str) -> Result<()> {
+        if self.running_audio.is_some() {
+            return Ok(());
+        }
+        let coord = self
+            .coordinator
+            .clone()
+            .ok_or_else(|| anyhow!("Client not initialized"))?;
+        let id = SessionId(call_id_str.to_string());
+        let audio = coord.session(&id).audio().await?;
+        self.muted.store(false, Ordering::SeqCst);
+        let running = AudioBridge::start(
+            audio,
+            self.audio_input_device.clone(),
+            self.audio_output_device.clone(),
+            self.muted.clone(),
+            self.event_sender.clone(),
+        )?;
+        self.running_audio = Some(running);
+        info!("Audio bridge started for call {}", call_id_str);
+        Ok(())
+    }
+
+    /// Stop the cpal audio bridge, if running.
+    pub fn stop_audio(&mut self) {
+        if self.running_audio.take().is_some() {
+            info!("Audio bridge stopped");
         }
     }
-    
-    /// List available audio devices
-    pub async fn list_audio_devices(&self, direction: AudioDirection) -> Result<Vec<(String, String)>> {
-        if let Some(client) = &self.client {
-            let devices = client.list_audio_devices(direction).await?;
-            Ok(devices.into_iter().map(|d| (d.id, d.name)).collect())
-        } else {
-            Ok(vec![])
-        }
+
+    /// List available audio devices for `direction` (cpal-backed).
+    pub async fn list_audio_devices(
+        &self,
+        direction: AudioDirection,
+    ) -> Result<Vec<(String, String)>> {
+        Ok(crate::audio::list_devices(direction))
     }
-    
-    /// Set audio device
-    pub async fn set_audio_device(&self, direction: AudioDirection, device_id: &str) -> Result<()> {
-        if let Some(client) = &self.client {
-            client.set_audio_device(direction, device_id).await?;
+
+    /// Select the capture/playback device for `direction`. An empty `device_id`
+    /// resets to the system default.
+    pub fn set_audio_device(&mut self, direction: AudioDirection, device_id: &str) -> Result<()> {
+        let value = if device_id.is_empty() {
+            None
+        } else {
+            Some(device_id.to_string())
+        };
+        match direction {
+            AudioDirection::Input => self.audio_input_device = value,
+            AudioDirection::Output => self.audio_output_device = value,
         }
         Ok(())
+    }
+
+    fn coord(&self) -> Result<&Arc<UnifiedCoordinator>> {
+        self.coordinator
+            .as_ref()
+            .ok_or_else(|| anyhow!("Client not initialized"))
     }
 }
 
 impl Drop for SipClientManager {
     fn drop(&mut self) {
-        // Cancel the event task if it exists
         if let Some(task) = self.event_task.take() {
             task.abort();
         }
     }
+}
+
+/// Translate a raw rvoip [`Event`] into the UI-facing [`SipEvent`].
+///
+/// Returns `None` for events the UI does not act on (NOTIFY, traces, detailed
+/// inspection variants, etc.).
+fn translate_event(event: Event) -> Option<SipEvent> {
+    Some(match event {
+        Event::IncomingCall { call_id, from, .. } => {
+            let display_name = parse_display_name(&from);
+            SipEvent::IncomingCall {
+                call_id: call_id.to_string(),
+                from,
+                display_name,
+            }
+        }
+        Event::CallProgress {
+            call_id,
+            status_code,
+            ..
+        } if (180..=189).contains(&status_code) => SipEvent::Ringing {
+            call_id: call_id.to_string(),
+        },
+        Event::CallAnswered { call_id, .. } => SipEvent::Connected {
+            call_id: call_id.to_string(),
+        },
+        Event::CallEnded { call_id, reason } => SipEvent::Ended {
+            call_id: call_id.to_string(),
+            reason,
+        },
+        Event::CallCancelled { call_id } => SipEvent::Ended {
+            call_id: call_id.to_string(),
+            reason: "cancelled".to_string(),
+        },
+        Event::CallFailed {
+            call_id,
+            status_code,
+            reason,
+        } => SipEvent::Failed {
+            call_id: call_id.to_string(),
+            code: status_code,
+            reason,
+        },
+        Event::CallOnHold { call_id } | Event::RemoteCallOnHold { call_id } => SipEvent::OnHold {
+            call_id: call_id.to_string(),
+        },
+        Event::CallResumed { call_id } | Event::RemoteCallResumed { call_id } => SipEvent::Resumed {
+            call_id: call_id.to_string(),
+        },
+        Event::CallMuted { call_id } => SipEvent::Muted {
+            call_id: call_id.to_string(),
+            muted: true,
+        },
+        Event::CallUnmuted { call_id } => SipEvent::Muted {
+            call_id: call_id.to_string(),
+            muted: false,
+        },
+        Event::DtmfReceived { call_id, digit } => SipEvent::Dtmf {
+            call_id: call_id.to_string(),
+            digit,
+        },
+        Event::ReferReceived {
+            call_id,
+            refer_to,
+            transfer_type,
+            ..
+        } => SipEvent::ReferRequested {
+            call_id: call_id.to_string(),
+            refer_to,
+            attended: transfer_type.eq_ignore_ascii_case("attended"),
+        },
+        Event::ReferProgress {
+            call_id, reason, ..
+        } => SipEvent::TransferProgress {
+            call_id: call_id.to_string(),
+            status: reason,
+        },
+        Event::TransferAccepted { call_id, .. } => SipEvent::TransferProgress {
+            call_id: call_id.to_string(),
+            status: "accepted".to_string(),
+        },
+        Event::ReferCompleted { call_id, .. } => SipEvent::TransferCompleted {
+            call_id: call_id.to_string(),
+        },
+        Event::TransferFailed {
+            call_id, reason, ..
+        } => SipEvent::TransferFailed {
+            call_id: call_id.to_string(),
+            reason,
+        },
+        Event::RegistrationSuccess { registrar, .. } => SipEvent::Registered { registrar },
+        Event::RegistrationFailed {
+            registrar, reason, ..
+        } => SipEvent::RegistrationFailed { registrar, reason },
+        Event::NetworkError { error, .. } => SipEvent::Error { message: error },
+        // Everything else (NOTIFY, traces, detailed/inspection variants,
+        // media-quality, session-timer refreshes, etc.) is not surfaced to the UI.
+        _ => return None,
+    })
+}
+
+/// Best-effort extraction of a display name from a SIP From value such as
+/// `"Alice" <sip:alice@host>`.
+fn parse_display_name(from: &str) -> Option<String> {
+    let trimmed = from.trim();
+    if let Some(end_quote_rel) = trimmed.strip_prefix('"').and_then(|rest| rest.find('"')) {
+        let name = &trimmed[1..=end_quote_rel];
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+    None
 }

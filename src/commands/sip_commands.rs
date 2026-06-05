@@ -2,6 +2,7 @@ use crate::sip_client::CallInfo;
 
 /// Commands sent from UI to SIP coroutine
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SipCommand {
     /// Initialize the SIP client with configuration
     Initialize {
@@ -32,11 +33,33 @@ pub enum SipCommand {
     /// Resume call from hold
     Resume,
     
-    /// Transfer call to another party
+    /// Blind-transfer the call to another party (RFC 3515)
     Transfer {
         target: String,
     },
-    
+
+    /// Send a DTMF digit on the active call (RFC 4733)
+    SendDtmf {
+        digit: char,
+    },
+
+    /// Select the capture (input) or playback (output) audio device
+    SetAudioDevice {
+        is_input: bool,
+        device_id: String,
+    },
+
+    /// Begin an attended transfer: place a consultation call to `target`
+    StartAttendedTransfer {
+        target: String,
+    },
+
+    /// Complete the in-progress attended transfer (connect the two parties)
+    CompleteAttendedTransfer,
+
+    /// Cancel the in-progress attended transfer and resume the original call
+    CancelAttendedTransfer,
+
     /// Toggle hook state (on/off hook)
     ToggleHook,
     
@@ -49,6 +72,7 @@ pub enum SipCommand {
 
 /// Responses sent from SIP coroutine back to UI
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SipResponse {
     /// Initialization completed
     Initialized,
@@ -99,6 +123,7 @@ pub enum SipResponse {
 
 /// Errors that can occur during SIP operations
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum SipError {
     /// Client not initialized
     NotInitialized,

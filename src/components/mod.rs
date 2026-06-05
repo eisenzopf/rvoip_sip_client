@@ -9,6 +9,8 @@ pub mod call_controls;
 pub mod call_control_state;
 pub mod hook_status;
 pub mod transfer_dialog;
+pub mod dtmf_keypad;
+pub mod audio_panel;
 
 pub use app::App;
 pub use registration_screen::RegistrationScreen;
@@ -18,4 +20,6 @@ pub use user_info_bar::UserInfoBar;
 pub use call_status::CallStatus;
 pub use call_controls::CallControls;
 pub use hook_status::HookStatus;
-pub use transfer_dialog::TransferDialog; 
+pub use transfer_dialog::TransferDialog;
+pub use dtmf_keypad::DtmfKeypad;
+pub use audio_panel::AudioPanel;
