@@ -11,9 +11,9 @@ lucide-dioxus = { version = "2.24.0", features = ["communication", "multimedia",
 # RVOIP - Modern Rust VoIP Stack
 ##rvoip = "0.1.26"
 rvoip = { path = "../rvoip/crates/rvoip" }
-# Media-core provides the AudioFrame type used by rvoip::sip::AudioStream
-# (not re-exported through the facade), needed for the cpal audio bridge.
-rvoip-media-core = { path = "../rvoip/crates/media/media-core" }
+# Supported cpal audio-device bridge (capture/playback, 20ms pacing, band-limited
+# resampling, jitter buffer, mute, VU) — replaces the hand-written src/audio bridge.
+rvoip-audio-device = { path = "../rvoip/crates/media/rvoip-audio-device" }
 
 # Additional dependencies for async and networking
 tokio = { version = "1.0", features = ["full"] }
@@ -28,9 +28,6 @@ uuid = { version = "1.0", features = ["v4"] }
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"
-
-# Audio and media handling
-cpal = "0.15"
 
 # Network utilities
 local-ip-address = "0.6"

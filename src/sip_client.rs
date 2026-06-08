@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 // New rvoip (0.2.x) SIP surface. The old `rvoip::sip_client` module is gone;
 // everything below comes from `rvoip::sip` (re-exported `rvoip-sip`).
 use rvoip::sip::{
-    Config, Event, EventReceiver, PeerControl, RegistrationHandle, SessionId, StreamPeer,
+    CallId, Config, Event, EventReceiver, PeerControl, RegistrationHandle, StreamPeer,
     UnifiedCoordinator,
 };
 
@@ -156,16 +156,11 @@ impl SipClientManager {
 
                 let mut config = Config::on(username, bind_ip, port);
                 // Address-of-record used in the From header (sip:user@domain).
+                // rvoip-sip now defaults the REGISTER Contact to the bound
+                // transport address and adopts the REGISTER credentials for
+                // challenged INVITE/BYE/REFER auth, so we no longer set
+                // config.contact_uri or config.credentials by hand.
                 config.local_uri = format!("sip:{}@{}", username, server_host);
-                // Reachable Contact so the registrar can route INVITEs back to us.
-                config.contact_uri = Some(format!("sip:{}@{}:{}", username, bind_ip, port));
-                // Default UAC digest credentials so challenged outbound requests
-                // (INVITE, etc.) can authenticate — Asterisk challenges calls too,
-                // not just REGISTER. Without this, INVITEs 401 and the call fails.
-                config.credentials = Some(rvoip::sip::types::Credentials::new(
-                    username.clone(),
-                    password.clone(),
-                ));
 
                 Ok((
                     config,
@@ -196,50 +191,37 @@ impl SipClientManager {
             let _ = coord.shutdown_gracefully(Some(Duration::from_secs(1))).await;
         }
 
-        let built = self.build_config()?;
-        let registration = built.1;
-        let contact_uri = built.0.contact_uri; // reachable Contact incl. :port
+        let registration = self.build_config()?.1;
 
-        // Bind with a short retry: on re-login to the same port, the previous
-        // socket can take a moment to release after the graceful shutdown above.
-        let mut peer = None;
-        let mut last_err: Option<anyhow::Error> = None;
-        for attempt in 1..=5u32 {
-            let config = self.build_config()?.0;
-            info!(
-                "SIP bind attempt {}/5: {} (bind {})",
-                attempt, config.local_uri, config.bind_addr
-            );
-            match StreamPeer::with_config(config).await {
-                Ok(p) => {
-                    peer = Some(p);
-                    break;
-                }
-                Err(e) => {
-                    info!("SIP bind attempt {} failed: {}", attempt, e);
-                    last_err = Some(e.into());
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                }
+        // rvoip-sip now sets SO_REUSEADDR on the UDP bind, so a re-login can
+        // rebind the same port without racing the previous socket's release.
+        // Keep a single short retry as belt-and-suspenders.
+        let config = self.build_config()?.0;
+        info!("SIP bind: {} (bind {})", config.local_uri, config.bind_addr);
+        let peer = match StreamPeer::with_config(config).await {
+            Ok(p) => p,
+            Err(first) => {
+                info!("SIP bind retry after: {}", first);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                let config = self.build_config()?.0;
+                StreamPeer::with_config(config).await.map_err(|e| {
+                    anyhow!("failed to bind SIP transport: {} (first attempt: {})", e, first)
+                })?
             }
-        }
-        let peer = peer
-            .ok_or_else(|| last_err.unwrap_or_else(|| anyhow!("failed to bind SIP transport")))?;
+        };
         let (control, events) = peer.split();
         self.coordinator = Some(control.coordinator().clone());
 
         // Server mode registers immediately; success/failure arrives as an event.
         if let Some((registrar, username, password)) = registration {
-            let mut builder = control
+            // rvoip-sip now defaults the Contact to the bound transport address,
+            // so we no longer pass an explicit contact here.
+            let builder = control
                 .register(registrar.clone(), username, password)
                 .with_expires(3600);
-            // Advertise the reachable transport address (incl. :port) so the
-            // registrar routes inbound calls back to us, not the port-less AOR.
-            if let Some(contact) = &contact_uri {
-                builder = builder.with_contact_uri(contact.clone());
-            }
             match builder.send().await {
                 Ok(handle) => {
-                    info!("REGISTER sent to {} (contact {:?})", registrar, contact_uri);
+                    info!("REGISTER sent to {}", registrar);
                     self.reg_handle = Some(handle);
                 }
                 Err(e) => {
@@ -375,7 +357,7 @@ impl SipClientManager {
             .coordinator
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         let result = coord.session(&id).hangup().await;
         self.stop_audio();
         self.muted.store(false, Ordering::SeqCst);
@@ -393,7 +375,7 @@ impl SipClientManager {
             .control
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         control.accept(&id).await.map_err(|e| {
             error!("Answer call failed: {}", e);
             anyhow!("Answer call failed: {}", e)
@@ -414,7 +396,7 @@ impl SipClientManager {
             .control
             .as_ref()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         control
             .reject(&id, 486, "Busy Here")
             .await
@@ -461,7 +443,7 @@ impl SipClientManager {
             .coordinator
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         let new_state = !self.muted.load(Ordering::SeqCst);
         self.muted.store(new_state, Ordering::SeqCst);
         // Best-effort signalling; the audio bridge enforces actual silence.
@@ -479,7 +461,7 @@ impl SipClientManager {
     pub async fn hold(&self, call_id_str: &str) -> Result<()> {
         info!("hold for call: {}", call_id_str);
         let coord = self.coord()?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         coord.session(&id).hold().await?;
         info!("Call put on hold");
         Ok(())
@@ -489,7 +471,7 @@ impl SipClientManager {
     pub async fn resume(&self, call_id_str: &str) -> Result<()> {
         info!("resume for call: {}", call_id_str);
         let coord = self.coord()?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         coord.session(&id).resume().await?;
         info!("Call resumed");
         Ok(())
@@ -498,7 +480,7 @@ impl SipClientManager {
     /// Send a DTMF digit on the active call.
     pub async fn send_dtmf(&self, call_id_str: &str, digit: char) -> Result<()> {
         let coord = self.coord()?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         coord.session(&id).send_dtmf(digit).await?;
         Ok(())
     }
@@ -507,7 +489,7 @@ impl SipClientManager {
     pub async fn transfer(&self, call_id_str: &str, target_uri: &str) -> Result<()> {
         info!("Blind transfer {} -> {}", call_id_str, target_uri);
         let coord = self.coord()?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         coord.session(&id).transfer_blind(target_uri).await?;
         Ok(())
     }
@@ -525,7 +507,7 @@ impl SipClientManager {
             .control
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let oid = SessionId(original_id.to_string());
+        let oid = CallId::from_string(original_id);
         let _ = coord.session(&oid).hangup().await;
         self.stop_audio();
         let new_id = control.invite(refer_to.to_string()).send().await?;
@@ -545,7 +527,7 @@ impl SipClientManager {
             .control
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let oid = SessionId(original_id.to_string());
+        let oid = CallId::from_string(original_id);
         // Hold the original and free the mic/speaker for the consultation leg.
         let _ = coord.session(&oid).hold().await;
         self.stop_audio();
@@ -571,7 +553,7 @@ impl SipClientManager {
             .coordinator
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let consult = SessionId(consult_id.to_string());
+        let consult = CallId::from_string(consult_id);
         let replaces = coord
             .session(&consult)
             .dialog_identity()
@@ -579,7 +561,7 @@ impl SipClientManager {
             .and_then(|id| id.to_replaces_value())
             .ok_or_else(|| anyhow!("consultation dialog not yet confirmed"))?;
         let refer_to = self.format_target_uri(target);
-        let original = SessionId(original_id.to_string());
+        let original = CallId::from_string(original_id);
         coord
             .session(&original)
             .transfer_attended(&refer_to, &replaces)
@@ -603,10 +585,10 @@ impl SipClientManager {
             .coordinator
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let consult = SessionId(consult_id.to_string());
+        let consult = CallId::from_string(consult_id);
         let _ = coord.session(&consult).hangup().await;
         self.stop_audio();
-        let original = SessionId(original_id.to_string());
+        let original = CallId::from_string(original_id);
         let _ = coord.session(&original).resume().await;
         Ok(())
     }
@@ -620,7 +602,7 @@ impl SipClientManager {
             .coordinator
             .clone()
             .ok_or_else(|| anyhow!("Client not initialized"))?;
-        let id = SessionId(call_id_str.to_string());
+        let id = CallId::from_string(call_id_str);
         let audio = coord.session(&id).audio().await?;
         self.muted.store(false, Ordering::SeqCst);
         let running = AudioBridge::start(
